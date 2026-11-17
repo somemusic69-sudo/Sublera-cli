@@ -6,14 +6,21 @@
  * model check, billing, streaming, booking timer, reconnect grace, and CLI commands
  * are all the real production paths.
  *
- * Run: npm run build && npm run e2e
+ * Run from the website repository: npm run e2e
  */
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const SERVER = (process.env.SUBLET_E2E_SERVER || 'http://127.0.0.1:8787').replace(/\/+$/, '');
+const serverUrl = new URL(SERVER);
+if (!['http:', 'https:'].includes(serverUrl.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(serverUrl.hostname) || serverUrl.username || serverUrl.password) {
+  throw new Error('End-to-end tests require a local server; refusing to use a live site');
+}
+const INBOX = process.env.SUBLET_E2E_INBOX;
+if (!INBOX) throw new Error('Run npm run e2e from the website repository to provide the temporary verification inbox');
 const CLI = join(process.cwd(), 'dist', 'index.js');
 const HOME = await mkdtemp(join(tmpdir(), 'sublet-e2e-'));
 let buyerKey = process.env.SUBLET_E2E_BUYER_KEY || '';
@@ -58,10 +65,20 @@ async function login(who) {
 }
 
 async function signup(username) {
+  const email = `${username}@sublet-e2e.test`;
+  const requested = await fetch(`${SERVER}/api/auth/signup/code`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, email }),
+  });
+  assert(requested.ok, `verification code request failed: ${requested.status}`);
+  const inboxFile = join(INBOX, createHash('sha256').update(email.toLowerCase()).digest('hex'));
+  const code = await waitFor(async () => {
+    try { return (await readFile(inboxFile, 'utf8')).trim(); } catch { return null; }
+  }, 10_000, 'the test verification email');
+  assert(/^\d{6}$/.test(code), 'invalid test verification code');
   const response = await fetch(`${SERVER}/api/auth/signup`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username, email: `${username}@sublet-e2e.test`, password: 'sublet-demo' }),
+    body: JSON.stringify({ username, email, password: 'sublet-demo', code, agree: true }),
   });
   const text = await response.text();
   assert(response.ok, `signup ${username} failed: ${response.status} ${text}`);
@@ -130,9 +147,14 @@ async function startJobs(token, requestId) {
   ]);
 }
 
+function isolatedEnv(home) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(SUBLERA_|SUBLET_|https?_proxy$|all_proxy$|no_proxy$)/i.test(name)));
+  return { ...env, SUBLERA_HOME: home, SUBLET_HOME: home };
+}
+
 function spawnCli(args, home = HOME) {
   const child = spawn(process.execPath, [CLI, ...args], {
-    env: { ...process.env, SUBLET_HOME: home },
+    env: isolatedEnv(home),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -181,7 +203,7 @@ try {
   log('host key', `issued for @${host.user.username} (${token.slice(0, 10)}...)`);
 
   const loginProc = spawn(process.execPath, [CLI, 'login', '--key', token, '--server', SERVER, '--json'], {
-    env: { ...process.env, SUBLET_HOME: HOME },
+    env: isolatedEnv(HOME),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let loginOutput = '';
@@ -295,7 +317,7 @@ try {
   const linkHome = await mkdtemp(join(tmpdir(), 'sublet-e2e-link-'));
   try {
     const linkProc = spawn(process.execPath, [CLI, 'login', '--json', '--no-browser', '--server', SERVER], {
-      env: { ...process.env, SUBLET_HOME: linkHome },
+      env: isolatedEnv(linkHome),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let linkOutput = '';

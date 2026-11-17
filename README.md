@@ -19,7 +19,7 @@ The old `sublet` / `sublet-cli` aliases and `SUBLET_*` environment variables rem
 supported; when both environment names are set, `SUBLERA_*` wins.
 The default `~/.sublet` directory is intentionally unchanged so both names share
 credentials, cache, and the instance lock. Model `.sublet.json` metadata is also
-unchanged. The repository remains `somemusic69-sudo/Sublet-cli`. The default
+unchanged. The repository is `somemusic69-sudo/Sublera-cli`. The default
 server moved from `https://sublet.duckdns.org` to `https://sublera.com`.
 See the [CLI migration guide](agent-cli/README.md#migration-from-sublet) for details.
 

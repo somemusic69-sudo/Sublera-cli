@@ -8,6 +8,13 @@ the files under `~/.sublet`. A change to any of these needs a major version.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-18
+
+### Fixed
+- Keep cached models with the same filename from different sources separate and preserve existing model files until a verified replacement is ready.
+- Validate model download sizes and resumed ranges before accepting downloaded bytes.
+- Run the end-to-end test with verified test email signup, isolated credentials, and a local in-memory server; refuse production URLs.
+
 ## [1.3.0] - 2026-11-14
 
 First release as `sublera-cli` (formerly `sublet-cli`).
@@ -168,5 +175,6 @@ First release as `sublera-cli` (formerly `sublet-cli`).
 
 - First public beta on npm.
 
-[Unreleased]: https://github.com/somemusic69-sudo/Sublet-cli/compare/v1.3.0...HEAD
-[1.3.0]: https://github.com/somemusic69-sudo/Sublet-cli/releases/tag/v1.3.0
+[Unreleased]: https://github.com/somemusic69-sudo/Sublera-cli/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/somemusic69-sudo/Sublera-cli/releases/tag/v1.3.1
+[1.3.0]: https://github.com/somemusic69-sudo/Sublera-cli/releases/tag/v1.3.0

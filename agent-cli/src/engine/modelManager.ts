@@ -133,6 +133,7 @@ export function forgetHashedModels(): void {
 }
 
 type Sidecar = {
+  sourceUrl?: string;
   sha256: string;
   size: number;
   mtimeMs: number;
@@ -213,9 +214,10 @@ export async function listCachedModels(cacheDir = modelsDir()): Promise<CachedMo
   return models;
 }
 
-async function writeSidecar(path: string, sha256: string, info: GgufInfo, snapshot: BigIntStats): Promise<void> {
+async function writeSidecar(path: string, sha256: string, info: GgufInfo, snapshot: BigIntStats, sourceUrl: string): Promise<void> {
   await assertUnchanged(path, snapshot);
   const data: Sidecar = {
+    sourceUrl,
     sha256,
     size: Number(snapshot.size),
     mtimeMs: Number(snapshot.mtimeNs) / 1e6,
@@ -272,10 +274,37 @@ export async function downloadModel(options: DownloadModelOptions): Promise<Load
 
 async function downloadModelWithinBudget(options: DownloadModelOptions): Promise<LoadedModel> {
   const expectedSha = expectedHash(options.expectedSha256);
+  const expectedSize = options.expectedSize ?? null;
+  if (expectedSize != null && (!Number.isSafeInteger(expectedSize) || expectedSize <= 0)) throw new Error('Expected model size must be a positive safe integer');
   const url = checkModelUrl(options.url, { allowLocalhost: options.allowLocalhost });
   const cacheDir = options.cacheDir ?? modelsDir();
   await ensureDir(cacheDir);
-  const dest = modelPathFor(url, cacheDir);
+  let dest = modelPathFor(url, cacheDir);
+  if (await fileExists(dest)) {
+    const sidecar = await readSidecar(dest);
+    // Filenames alone do not identify Hugging Face models. Preserve older cache
+    // entries whose source is unknown unless an expected hash can identify them.
+    let separate = sidecar?.sourceUrl ? sidecar.sourceUrl !== url : !expectedSha;
+    if (!sidecar?.sourceUrl && expectedSha) {
+      options.signal?.throwIfAborted();
+      const size = Number((await stat(dest, { bigint: true })).size);
+      let lastNote = 0;
+      const hashed = await hashModel(dest, (received) => {
+        options.signal?.throwIfAborted();
+        const time = Date.now();
+        if (received < size && time - lastNote < 1_000) return;
+        lastNote = time;
+        emitProgress(options, { phase: 'verify', received, total: size, percent: size ? Math.min(100, received / size * 100) : null, speedBps: null, etaSeconds: null, note: `Verifying cached ${basename(dest)}` }, null);
+      });
+      await assertUnchanged(dest, hashed.snapshot);
+      hashedThisRun.set(dest, { identity: fileIdentity(hashed.snapshot), sha256: hashed.sha256 });
+      separate = hashed.sha256 !== expectedSha || (expectedSize != null && Number(hashed.snapshot.size) !== expectedSize);
+    }
+    if (separate) {
+      const key = createHash('sha256').update(url).digest('hex').slice(0, 32);
+      dest = join(cacheDir, `${key}-${basename(dest)}`);
+    }
+  }
   const part = `${dest}.part`;
   const context = options.context ?? 8192;
   const slots = options.slots ?? 1;
@@ -308,7 +337,7 @@ async function downloadModelWithinBudget(options: DownloadModelOptions): Promise
         actual = hashed.sha256;
         snapshot = hashed.snapshot;
       }
-      if (expectedSha && actual !== expectedSha) {
+      if ((expectedSha && actual !== expectedSha) || (expectedSize != null && Number(snapshot.size) !== expectedSize)) {
         // A measured mismatch justifies fetching a replacement, not deleting the current file
         // before that replacement succeeds. IO, header, callback, and sidecar errors never do.
         hashedThisRun.delete(dest);
@@ -316,7 +345,7 @@ async function downloadModelWithinBudget(options: DownloadModelOptions): Promise
       } else {
         const info = await verifyHeader(dest, options.expectedLayers);
         await assertUnchanged(dest, snapshot);
-        await writeSidecar(dest, actual, info, snapshot);
+        await writeSidecar(dest, actual, info, snapshot, url);
         hashedThisRun.set(dest, { identity: fileIdentity(snapshot), sha256: actual });
         return loadedFrom(dest, url, actual, Number(snapshot.size), info, Boolean(expectedSha), context, slots);
       }
@@ -331,8 +360,7 @@ async function downloadModelWithinBudget(options: DownloadModelOptions): Promise
     await removeIfExists(part);
     startAt = 0;
   }
-  let total = options.expectedSize ?? null;
-  if (total != null && (!Number.isSafeInteger(total) || total <= 0)) throw new Error('Expected model size must be a positive safe integer');
+  let total = expectedSize;
   let response: Response;
   const headers: Record<string, string> = { 'user-agent': USER_AGENT, accept: 'application/octet-stream' };
   if (startAt > 0) headers.range = `bytes=${startAt}-`;
@@ -352,15 +380,31 @@ async function downloadModelWithinBudget(options: DownloadModelOptions): Promise
   if (!response.ok || !response.body) {
     throw new Error(`Download failed with HTTP ${response.status}`);
   }
+  if (response.status !== 200 && !(startAt > 0 && response.status === 206)) {
+    await response.body.cancel().catch(() => undefined);
+    throw new Error(`Unexpected model download response: HTTP ${response.status}`);
+  }
   let append = false;
   if (startAt > 0 && response.status === 206) {
     const contentRange = response.headers.get('content-range') || '';
-    const match = contentRange.match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
-    if (!match || Number(match[1]) !== startAt) {
+    const match = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+    const rangeEnd = Number(match?.[2]);
+    const advertisedTotal = match?.[3] && match[3] !== '*' ? Number(match[3]) : null;
+    if (!match || Number(match[1]) !== startAt || !Number.isSafeInteger(rangeEnd) || rangeEnd < startAt ||
+        (advertisedTotal != null && (!Number.isSafeInteger(advertisedTotal) || rangeEnd >= advertisedTotal))) {
       await response.body.cancel().catch(() => undefined);
       throw new Error(`Server returned an invalid resume range: ${contentRange || 'missing'}`);
     }
-    total = match[3] && match[3] !== '*' ? Number(match[3]) : total;
+    const rangeTotal = advertisedTotal;
+    if (rangeTotal != null && total != null && rangeTotal !== total) {
+      await response.body.cancel().catch(() => undefined);
+      throw new Error(`Model download size mismatch: expected ${total} bytes, server reports ${rangeTotal}`);
+    }
+    total = rangeTotal ?? total;
+    if (total == null || rangeEnd !== total - 1) {
+      await response.body.cancel().catch(() => undefined);
+      throw new Error('Server did not return the complete remaining model range');
+    }
     append = true;
   } else if (response.status === 200 && startAt > 0) {
     // Server ignored Range; the body starts at byte zero.
@@ -509,7 +553,7 @@ async function downloadModelWithinBudget(options: DownloadModelOptions): Promise
   if (hashed.sha256 !== actual) throw new Error(`The model file ${basename(dest)} changed during download verification`);
   const info = await verifyHeader(dest, options.expectedLayers);
   await assertUnchanged(dest, hashed.snapshot);
-  await writeSidecar(dest, hashed.sha256, info, hashed.snapshot);
+  await writeSidecar(dest, hashed.sha256, info, hashed.snapshot, url);
   const model = loadedFrom(dest, url, hashed.sha256, Number(hashed.snapshot.size), info, Boolean(expectedSha), context, slots);
   emitProgress(options, {
     phase: 'header',

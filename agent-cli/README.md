@@ -33,7 +33,7 @@ Postgres/SQLite ledger, wallet, reliability, request board
   `~/.sublera`: old and new names share credentials, model/engine cache, recovery
   state, and the instance lock. Do not move it merely for the rebrand. Existing
   model `.sublet.json` metadata filenames are unchanged.
-- The repository remains `somemusic69-sudo/Sublet-cli`. The default server is
+- The repository is `somemusic69-sudo/Sublera-cli`. The default server is
   `https://sublera.com` (it was `https://sublet.duckdns.org` before 1.3.0).
 - The npm package is `sublera-cli`, published only by the Release workflow
   (`.github/workflows/release.yml`) with npm provenance.
@@ -221,10 +221,13 @@ Everything lives under `~/.sublet` (override with `SUBLERA_HOME`):
 ~/.sublet/logs/llama-server.log  engine log (prompt logging disabled)
 ```
 
-A model that is already on disk is not downloaded again, but it is hashed again
-before it is served (once per agent run), so the SHA-256 sent to the server is
-of the bytes on disk and not of the sidecar note beside them. A file that fails
-is deleted and downloaded again. A resume sends `Range: bytes=N-` and appends
+A matching cached model is hashed again before it is served (once per agent run),
+so the SHA-256 sent to the server is of the bytes on disk and not of the sidecar
+note beside them. Models with the same filename from different URLs are cached
+separately. Older cached models without source information need a matching
+expected SHA-256 to be reused; otherwise the old file is preserved and the model
+is downloaded separately. A cached file that fails verification is kept until a
+replacement has been downloaded and checked. A resume sends `Range: bytes=N-` and appends
 only the missing bytes. If a server ignores Range, the partial file is discarded
 and the download restarts from zero rather than corrupting weights.
 
@@ -520,17 +523,15 @@ npm test
 npm run build
 node dist/index.js --help
 
-# end-to-end against a running Sublera server
-$env:SUBLERA_HOME="$env:TEMP\sublera-cli-e2e"
-npm run e2e
+# From the Sublera website repository, run its isolated end-to-end test:
+# Set SUBLET_CLI_DIR to this agent-cli folder, then run npm run e2e there.
 ```
 
-The e2e script signs up a fresh host, issues a key, drives the real tunnel, does
+The e2e script starts a local test server, verifies a test email, signs up a fresh host, issues a key, drives the real tunnel, does
 a billed pay-per-token stream, creates and claims a 30-minute booking, verifies
 the timer starts after the model check, verifies booked tokens are not charged,
 drops the tunnel, reconnects inside the grace window, verifies the same timer
-survives, and cancels the request. It uses simulation mode so it does not need
-a real 4GB+ model.
+survives, and cancels the request. It uses an in-memory database and simulation mode, so it needs neither production accounts nor a real model. It refuses non-local servers.
 
 ## Packaging and publication status
 
@@ -550,7 +551,7 @@ from a laptop. Check a release's provenance on its npm page.
 This build was verified on a Windows machine with an RTX 4060:
 
 - `npm run typecheck`, `npm test`, and `npm run build` pass.
-- `npm run e2e` passes against a live Sublera server: tunnel, billed public
+- `npm run e2e` passes against an isolated local Sublera server: tunnel, billed public
   stream, model check, booking timer, unlimited booked stream, jobs board,
   process-kill crash recovery with the same timer, standalone `jobs` serving,
   escrow cleanup, device login, and take + `start <code>`.

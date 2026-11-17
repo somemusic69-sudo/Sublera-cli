@@ -129,7 +129,7 @@ test('mutation while hashing rejects the observation without deleting the model'
     }), /changed during verification/);
     assert.ok(mutated);
     assert.deepEqual(await readFile(path), replacement);
-    const loaded = await downloadModel({ url: STUB_URL, cacheDir: dir, showProgress: false });
+    const loaded = await downloadModel({ url: STUB_URL, cacheDir: dir, expectedSha256: createHash('sha256').update(replacement).digest('hex'), showProgress: false });
     assert.equal(loaded.sha256, createHash('sha256').update(replacement).digest('hex'));
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -225,8 +225,96 @@ test('sidecar IO and header validation errors preserve cached model bytes', asyn
     assert.deepEqual(await readFile(path), MODEL);
     const badHeader = Buffer.from('not a GGUF');
     await writeFile(path, badHeader);
-    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, showProgress: false }), /GGUF/);
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, expectedSha256: createHash('sha256').update(badHeader).digest('hex'), showProgress: false }), /GGUF/);
     assert.deepEqual(await readFile(path), badHeader);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('different model URLs with the same filename never reuse each other without a hash', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-source-'));
+  const secondUrl = 'https://huggingface.co/other/repo/resolve/main/model.gguf';
+  const other = Buffer.concat([MODEL, Buffer.from('different model')]);
+  let requests = 0;
+  try {
+    const fetchImpl = (async (input: string | URL | Request) => {
+      requests++;
+      return new Response(new Uint8Array(String(input) === STUB_URL ? MODEL : other));
+    }) as typeof fetch;
+    const first = await downloadModel({ url: STUB_URL, cacheDir: dir, fetchImpl, showProgress: false });
+    const second = await downloadModel({ url: secondUrl, cacheDir: dir, fetchImpl, showProgress: false });
+    assert.notEqual(first.path, second.path);
+    assert.deepEqual(await readFile(first.path), MODEL);
+    assert.deepEqual(await readFile(second.path), other);
+    assert.equal((await downloadModel({ url: secondUrl, cacheDir: dir, fetchImpl, showProgress: false })).path, second.path);
+    assert.equal(requests, 2);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('legacy cache without a source is preserved and not assumed to match a URL', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-legacy-'));
+  try {
+    const legacy = modelPathFor(STUB_URL, dir);
+    const old = Buffer.concat([MODEL, Buffer.from('legacy')]);
+    await writeFile(legacy, old);
+    const loaded = await downloadModel({ url: STUB_URL, cacheDir: dir, fetchImpl: modelFetch, showProgress: false });
+    assert.notEqual(loaded.path, legacy);
+    assert.deepEqual(await readFile(legacy), old);
+    assert.deepEqual(await readFile(loaded.path), MODEL);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a legacy model with a different expected hash is preserved after a successful download', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-legacy-hash-'));
+  try {
+    const legacy = modelPathFor(STUB_URL, dir);
+    const old = Buffer.concat([MODEL, Buffer.from('different legacy model')]);
+    await writeFile(legacy, old);
+    const loaded = await downloadModel({ url: STUB_URL, cacheDir: dir, fetchImpl: modelFetch, expectedSha256: SHA, showProgress: false });
+    assert.notEqual(loaded.path, legacy);
+    assert.deepEqual(await readFile(legacy), old);
+    assert.deepEqual(await readFile(loaded.path), MODEL);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('resuming cannot replace the caller supplied size with a conflicting server size', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-size-'));
+  try {
+    const part = `${modelPathFor(STUB_URL, dir)}.part`;
+    await writeFile(part, MODEL.subarray(0, 100));
+    await writeFile(`${part}.json`, JSON.stringify({ url: STUB_URL }));
+    const fetchImpl = (async () => new Response(new Uint8Array(MODEL.subarray(100)), {
+      status: 206, headers: { 'content-range': `bytes 100-${MODEL.length - 1}/${MODEL.length}` },
+    })) as typeof fetch;
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, fetchImpl, expectedSize: MODEL.length + 1, showProgress: false }), /size mismatch/);
+    assert.deepEqual(await readFile(part), MODEL.subarray(0, 100));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('unsolicited partial responses and malformed resume ranges are rejected', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-model-range-'));
+  try {
+    const partialResponse = (range: string) => (async () => new Response(new Uint8Array(MODEL.subarray(100)), {
+      status: 206, headers: { 'content-range': range },
+    })) as typeof fetch;
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, fetchImpl: partialResponse(`bytes 100-${MODEL.length - 1}/${MODEL.length}`), showProgress: false }), /Unexpected model download response/);
+    const part = `${modelPathFor(STUB_URL, dir)}.part`;
+    await writeFile(part, MODEL.subarray(0, 100));
+    await writeFile(`${part}.json`, JSON.stringify({ url: STUB_URL }));
+    for (const range of [`bytes 100-99/${MODEL.length}`, `bytes 100-${MODEL.length}/${MODEL.length}`, `prefix bytes 100-${MODEL.length - 1}/${MODEL.length}`]) {
+      await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, fetchImpl: partialResponse(range), showProgress: false }), /invalid resume range/);
+      assert.deepEqual(await readFile(part), MODEL.subarray(0, 100));
+    }
+    await assert.rejects(downloadModel({ url: STUB_URL, cacheDir: dir, fetchImpl: partialResponse(`bytes 100-${MODEL.length - 1}/*`), showProgress: false }), /complete remaining model range/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
