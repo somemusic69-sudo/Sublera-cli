@@ -711,6 +711,8 @@ test('a restart restores every saved booking with its slot count and drops the o
     const hello = server.frames.find((f) => f.type === 'hello')!;
     assert.equal(hello.slots, 4, 'llama-server must come back with the largest saved slot count');
     assert.equal(hello.context, 4096);
+    // Persisting the reconciled list is queued; wait for the write before reading it.
+    await (agent as unknown as { stateWrite: Promise<void> }).stateWrite;
     const saved = await readAgentState();
     assert.deepEqual(saved?.bookings.map((b) => [b.requestId, b.slots]).sort(), [['r_one', 4], ['r_two', 2]]);
   } finally {

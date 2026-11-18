@@ -176,7 +176,7 @@ agent-cli/
 │       ├── terminalDashboard.ts the overnight status box
 │       └── progress.ts          download bar with speed and ETA
 ├── tests/                       unit tests, no network or GPU required
-├── scripts/e2e.mjs              9-check end-to-end proof against a live Sublera server
+├── scripts/e2e.mjs              13-check end-to-end test against an isolated local server
 └── README.md
 ```
 

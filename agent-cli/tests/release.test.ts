@@ -19,6 +19,14 @@ test('the minimum Node version is the same in package.json and doctor', () => {
   assert.equal(pkg.engines.node, `>=${MIN_NODE}`);
 });
 
+test('release workflow supports token-free trusted publishing', async () => {
+  const workflow = await readFile(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /id-token:\s*write/);
+  assert.match(workflow, /npm install --global npm@11\.21\.2/);
+  assert.doesNotMatch(workflow, /secrets\.NPM_TOKEN/);
+  assert.doesNotMatch(workflow, /registry-url:/);
+});
+
 test('the lockfile root metadata matches the published package', async () => {
   const lock = JSON.parse(await readFile(new URL('../package-lock.json', import.meta.url), 'utf8'));
   assert.equal(lock.version, pkg.version);
