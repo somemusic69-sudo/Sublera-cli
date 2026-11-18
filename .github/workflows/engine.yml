@@ -89,7 +89,9 @@ env:
     atmost "$glibcxx" GLIBCXX_3.4.25 || fail "needs $glibcxx"
     atmost "$cxxabi" CXXABI_1.3.11 || fail "needs $cxxabi"
     # Only system libraries every glibc Linux has, the files in this folder, and the driver's libcuda.
-    allowed="$(printf '%s\n' libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 ld-linux-x86-64.so.2 libgcc_s.so.1 libstdc++.so.6 libcuda.so.1 "${elves[@]}")"
+    # Library links (libggml-base.so.1 -> libggml-base.so.1.0.0) count as files in this folder.
+    mapfile -t names < <(find . -maxdepth 1 \( -type f -o -type l \) -name '*.so*' -printf '%f\n')
+    allowed="$(printf '%s\n' libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 ld-linux-x86-64.so.2 libgcc_s.so.1 libstdc++.so.6 libcuda.so.1 "${names[@]}")"
     for f in "${elves[@]}"; do
       extra="$(readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | grep -vxF "$allowed" || true)"
       [ -z "$extra" ] || fail "$f needs $extra"
