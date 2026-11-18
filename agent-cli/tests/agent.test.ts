@@ -174,14 +174,17 @@ test('stopping while the first status call is in flight ends run()', async () =>
 test('a live host with no model answers with an error, not simulated text', async () => {
   const server = await fakeServer({
     onSocket: (socket) => {
-      setTimeout(() => socket.send(JSON.stringify({ type: 'infer', jobId: 'j1', messages: [{ role: 'user', content: 'hi' }], maxTokens: 4 })), 100);
+      socket.on('message', (raw) => {
+        if ((JSON.parse(String(raw)) as Frame).type === 'hello') {
+          socket.send(JSON.stringify({ type: 'infer', jobId: 'j1', messages: [{ role: 'user', content: 'hi' }], maxTokens: 4 }));
+        }
+      });
     },
   });
   const agent = agentFor(server.url, false);
   try {
     void agent.run().catch(() => undefined);
-    const deadline = Date.now() + 5_000;
-    while (!server.frames.some((f) => f.jobId === 'j1') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    await eventually(() => server.frames.some((f) => f.jobId === 'j1'));
     await new Promise((r) => setTimeout(r, 100));
     const jobFrames = server.frames.filter((f) => f.jobId === 'j1');
     assert.equal(jobFrames.length, 1, `expected one frame for the job, got ${JSON.stringify(jobFrames)}`);
