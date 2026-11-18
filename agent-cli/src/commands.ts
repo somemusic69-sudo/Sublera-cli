@@ -10,7 +10,8 @@ import type { Logger } from './logger.js';
 import { GpuMonitor, applyGpuOverride, checkFit, type GpuOverride } from './hardware/gpuMonitor.js';
 import type { GpuStats } from './hardware/types.js';
 import { sleepGuardAvailable, SleepGuard } from './hardware/sleepGuard.js';
-import { ensureLlamaServer, findExistingLlama, probeLlamaServer, variantFor } from './engine/binaryManager.js';
+import { ensureLlamaServer, findExistingLlama, probeLlamaServer, variantFor, type LlamaInstall } from './engine/binaryManager.js';
+import { detectEngineHost, engineCandidates, parseVariant, type EngineHost } from './engine/engineHost.js';
 import { inspectHuggingFace, parseHfUrl } from './engine/gguf.js';
 import { readConfigFile, writeConfigFile } from './util/fs.js';
 import { fetchJson, HttpError, latestPublishedVersion, measureDownloadSpeed } from './util/http.js';
@@ -215,6 +216,16 @@ const SPEED_TEST_URL = 'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0
 // Below 2 MB/s an 8 GB model takes more than an hour to download.
 const SLOW_DOWNLOAD_BYTES_PER_SEC = 2 * 1024 * 1024;
 
+/** Linux libraries and drivers that decide which llama.cpp builds can run. */
+function engineHostCheck(host: EngineHost): Check {
+  const parts = [host.glibc ? `glibc ${host.glibc}` : 'no glibc found (musl?)'];
+  if (host.nvidiaDriver != null) parts.push(`NVIDIA driver ${host.nvidiaDriver}${host.computeCapability != null ? `, compute ${host.computeCapability.toFixed(1)}` : ''}`);
+  if (host.vulkan) parts.push(`Vulkan ${host.vulkan.loader && host.vulkan.driver ? 'found' : host.vulkan.loader ? 'loader without a driver' : 'not found'}`);
+  if (host.rocm) parts.push(`ROCm ${host.rocm.driver && host.rocm.runtime ? 'found' : 'not found'}`);
+  const none = engineCandidates(host).candidates.length === 0;
+  return check('Engine host', none ? 'warn' : 'ok', none ? `${parts.join(' · ')} · no prebuilt llama.cpp build runs here; set LLAMA_SERVER to your own build` : parts.join(' · '));
+}
+
 function check(name: string, status: Check['status'], detail: string): Check {
   return { name, status, detail };
 }
@@ -282,30 +293,65 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
   const sleepOk = await sleepGuardAvailable(process.platform);
   checks.push(check('Sleep guard', sleepOk ? 'ok' : 'warn', sleepOk ? 'Wake-lock is available for overnight bookings' : 'No supported wake-lock on this platform'));
 
-  let install = await findExistingLlama({ env: process.env });
-  if (!install && flags.fix) {
+  let host: EngineHost | null = null;
+  if (process.platform === 'linux') {
+    host = await detectEngineHost({ gpu });
+    checks.push(engineHostCheck(host));
+  }
+
+  let install: LlamaInstall | null = await findExistingLlama({ env: process.env });
+  let problem: string | null = null;
+  let warning: string | null = null;
+  let probe = !flags.fix;
+  if (flags.fix) {
+    // --fix also replaces an engine that cannot start, trying the next build that fits this computer.
+    let release: (() => Promise<void>) | null = null;
     try {
-      const release = await acquireInstanceLock();
+      release = await acquireInstanceLock();
+    } catch (error) {
+      // A running agent owns the engine directory; report the installed engine without changing it.
+      if (!install) checks.push(check('llama-server', 'fail', toError(error).message));
+      else warning = `not changed: ${toError(error).message}`;
+      probe = Boolean(install);
+    }
+    if (release) {
       try {
-        const result = await ensureLlamaServer({ fix: true, gpu, logger, showProgress: true, requireChecksum: flags.requireChecksum, simulation: false });
-        if (result.found) install = result.install;
-        else checks.push(check('llama-server', 'fail', result.reason));
+        const result = await ensureLlamaServer({ fix: true, retryFailed: true, gpu, host: host ?? undefined, logger, showProgress: true, requireChecksum: flags.requireChecksum, simulation: false });
+        if (result.found) {
+          install = result.install;
+          warning = result.warning ?? null;
+        } else {
+          install = null;
+          checks.push(check('llama-server', 'fail', result.reason));
+        }
+      } catch (error) {
+        install = null;
+        checks.push(check('llama-server', 'fail', toError(error).message));
       } finally {
         await release();
       }
-    } catch (error) {
-      checks.push(check('llama-server', 'fail', toError(error).message));
+    }
+  }
+  if (probe && install) {
+    problem = await probeLlamaServer(install.path, process.env, install.variant, host);
+    if (problem && install.source !== 'env') problem += ' Run: sublera doctor --fix to try other engine builds.';
+    const vendor = gpu.primary?.vendor;
+    if (!problem && !warning && install.source === 'manifest' && install.variant === 'cpu' && (vendor === 'nvidia' || vendor === 'amd' || vendor === 'intel')
+        && parseVariant(brandEnv(process.env, 'SUBLET_LLAMA_VARIANT')) !== 'cpu') {
+      warning = `CPU build on a computer with a ${gpu.primary?.name || 'GPU'}: no GPU build could run here. Run: sublera doctor --fix to see why and to try the GPU builds again.`;
     }
   }
   if (install) {
-    const problem = await probeLlamaServer(install.path);
     const own = install.source === 'env' || install.source === 'path';
     const trust = own
       ? `your own build (${install.source === 'env' ? 'LLAMA_SERVER' : 'PATH'}), not checked; a different llama.cpp build can fail model checks`
       : install.verified ? 'checksum verified' : 'local hash recorded, no published checksum';
+    const build = `${install.build === 'portable' ? 'portable ' : ''}${install.variant}${install.cuda ? ` ${install.cuda}` : ''}`;
     checks.push(problem
       ? check('llama-server', 'fail', problem)
-      : check('llama-server', install.verified ? 'ok' : flags.requireChecksum ? 'fail' : 'warn', `${install.path} · ${own ? trust : `${install.variant} · ${trust}`}`));
+      : warning
+        ? check('llama-server', 'warn', `${install.path} · ${warning}`)
+        : check('llama-server', install.verified ? 'ok' : flags.requireChecksum ? 'fail' : 'warn', `${install.path} · ${own ? trust : `${build} · ${trust}`}`));
   } else if (!flags.fix) {
     checks.push(check('llama-server', 'warn', `Not installed. Run: sublera doctor --fix (target: ${variantFor(process.platform, process.arch, gpu.primary?.vendor)})`));
   }

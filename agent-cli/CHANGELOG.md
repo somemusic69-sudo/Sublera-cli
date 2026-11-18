@@ -8,6 +8,34 @@ the files under `~/.sublet`. A change to any of these needs a major version.
 
 ## [Unreleased]
 
+### Added
+- The engine installer tries a list of llama.cpp builds for the GPU and keeps the first one that
+  starts and finds the GPU: CUDA 12 and 13 (chosen by NVIDIA driver and GPU generation), Vulkan,
+  ROCm for AMD on Linux, and CPU last. Linux and Windows arm64 builds are now used on arm64.
+- Portable Linux x64 builds (glibc 2.28 or newer; CUDA 12.4 with native code for compute
+  capability 5.0 to 9.0 and the CUDA runtime included, NVIDIA driver 525 or newer) for older GPU
+  images, built from official llama.cpp tags by the new Engine workflow and published as
+  `engine-<tag>` releases. This version asks for `engine-b12503`.
+- CUDA builds are chosen by NVIDIA driver and GPU: a build is skipped when the driver is too old
+  for it, or when it has no native code for the GPU and the driver cannot compile its PTX.
+- A downloaded build that cannot run is deleted and not downloaded again for 7 days;
+  `doctor --fix` tries it again.
+- `SUBLERA_LLAMA_VARIANT` tries only one kind of build.
+- On Linux, `doctor` shows the glibc version, NVIDIA driver and compute capability, and whether
+  Vulkan and ROCm were found.
+
+### Fixed
+- On Linux, the CUDA runtime libraries were installed in a different folder from the CUDA backend,
+  so the CUDA build ran on the CPU without a message. They are now next to `llama-server`.
+- An engine that starts but whose GPU backend finds no GPU is no longer reported ready.
+- Official builds that need a newer glibc, a Vulkan build without a Vulkan driver, and a CUDA build
+  for a driver that is too old are skipped without a download, and the reason is shown.
+- `doctor --fix` replaces an installed engine that cannot start instead of only reporting it. While
+  the agent runs, it reports the installed engine without changing it.
+- GitHub API errors such as the rate limit are reported, not shown as a missing build.
+- Loader errors (`GLIBC_x not found`, a missing `libcuda.so.1` or `libvulkan.so.1`) are explained.
+- llama.cpp publishes its builds as pre-releases, so the release list is read first.
+
 ## [1.3.2] - 2026-11-18
 
 ### Fixed

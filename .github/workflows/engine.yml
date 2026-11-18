@@ -1,0 +1,208 @@
+name: Engine
+
+# Builds a portable llama-server for Linux x64 from an official llama.cpp tag.
+#
+# The official llama.cpp Linux builds are made on Ubuntu 22.04 (CPU, Vulkan: glibc 2.34) and
+# Ubuntu 24.04 (CUDA, ROCm: glibc 2.38), so they cannot start on older GPU images such as
+# Ubuntu 20.04/22.04, Debian 11/12 or RHEL 8/9. These builds are made on Rocky Linux 8
+# (glibc 2.28), carry the CUDA runtime next to llama-server, and need neither OpenSSL nor OpenMP.
+#
+# A pull request that changes this file builds and tests the engines. A manual run from main with
+# "publish" set creates the release engine-<llama.cpp tag>; sublera-cli asks for the tag in ENGINE_TAG
+# (agent-cli/src/engine/binaryManager.ts).
+on:
+  pull_request:
+    paths: ['.github/workflows/engine.yml']
+  workflow_dispatch:
+    inputs:
+      llama_tag:
+        description: llama.cpp release tag to build (bNNNNN)
+        required: true
+        default: b12503
+      publish:
+        description: Publish the release engine-<tag>
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LLAMA_TAG: ${{ inputs.llama_tag || 'b12503' }}
+  # CUDA 12.4: the newest CUDA that does not add the compressed GPU code (ggml uses it from 12.8),
+  # which drivers older than R550 cannot load. Minor-version compatibility then needs driver 525.
+  CUDA_IMAGE: nvidia/cuda:12.4.1-devel-rockylinux8
+  CPU_IMAGE: rockylinux:8
+  # Native code for Maxwell, Pascal, Volta, Turing, Ampere, Ada and Hopper, so no driver-side PTX
+  # compile (which needs R550) is necessary there; "90" also adds PTX, which newer GPUs compile.
+  # Keep this list the same as 'portable-linux-12' in agent-cli/src/engine/engineHost.ts.
+  CUDA_ARCHITECTURES: 50-real;60-real;61-real;70-real;75-real;80-real;86-real;89-real;90
+  BUILD_SH: |
+    set -euo pipefail
+    flavor="$1"
+    fail() { echo "::error::$*"; exit 1; }
+    dnf -y -q install gcc-toolset-12-gcc gcc-toolset-12-gcc-c++ gcc-toolset-12-binutils cmake git findutils
+    set +u; source /opt/rh/gcc-toolset-12/enable; set -u
+    git clone --quiet --depth 1 --branch "$LLAMA_TAG" https://github.com/ggml-org/llama.cpp /src
+    commit="$(git -C /src rev-parse --short=7 HEAD)"
+    cuda=()
+    if [ "$flavor" != cpu ]; then
+      cuda=(-DGGML_CUDA=ON -DGGML_CUDA_NCCL=OFF "-DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" "-DCMAKE_CUDA_HOST_COMPILER=$(command -v g++)")
+    fi
+    # DT_RPATH (not RUNPATH), so the bundled libraries win over LD_LIBRARY_PATH, which CUDA images often set.
+    ld=-Wl,--disable-new-dtags
+    cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+      '-DCMAKE_INSTALL_RPATH=$ORIGIN' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+      "-DCMAKE_EXE_LINKER_FLAGS=$ld" "-DCMAKE_SHARED_LINKER_FLAGS=$ld" "-DCMAKE_MODULE_LINKER_FLAGS=$ld" \
+      -DGGML_BACKEND_DL=ON -DGGML_NATIVE=OFF -DGGML_CPU_ALL_VARIANTS=ON -DGGML_OPENMP=OFF \
+      -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=ON \
+      -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_APP=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
+      "-DLLAMA_BUILD_NUMBER=${LLAMA_TAG#b}" "-DLLAMA_BUILD_COMMIT=$commit" "${cuda[@]}"
+    cmake --build /build --config Release --target llama-server -j "$(nproc)"
+    kind=cpu
+    [ "$flavor" = cpu ] || kind="cuda-${CUDA_VERSION%.*}"
+    name="sublera-llama-$LLAMA_TAG-linux-$kind-x64"
+    pkg="/out/$name"
+    mkdir -p "$pkg"
+    cp -a /build/bin/llama-server /build/bin/lib*.so* "$pkg/"
+    cp /src/LICENSE "$pkg/LICENSE-llama.cpp"
+    echo "llama.cpp $LLAMA_TAG ($commit), $(gcc --version | head -n1), Rocky Linux 8, needs glibc 2.28 or newer" > "$pkg/BUILD-INFO.txt"
+    if [ "$flavor" != cpu ]; then
+      major="${CUDA_VERSION%%.*}"
+      # Unmodified NVIDIA redistributables (CUDA EULA, Attachment A).
+      for lib in libcudart libcublas libcublasLt; do cp -L "/usr/local/cuda/lib64/$lib.so.$major" "$pkg/"; done
+      echo "libcudart, libcublas and libcublasLt.so.$major are unmodified NVIDIA CUDA $CUDA_VERSION redistributables (https://docs.nvidia.com/cuda/eula/index.html)." > "$pkg/NOTICE-NVIDIA-CUDA.txt"
+      echo "CUDA $CUDA_VERSION, GPU code: $CUDA_ARCHITECTURES, needs NVIDIA driver 525 or newer" >> "$pkg/BUILD-INFO.txt"
+    fi
+    cd "$pkg"
+    mapfile -t elves < <(find . -maxdepth 1 -type f \( -name llama-server -o -name '*.so*' \) -printf '%f\n' | sort)
+    # Every ELF must load on glibc 2.28 with the libstdc++ of GCC 8.
+    highest() { { objdump -T "${elves[@]}" | grep -oE "$1_[0-9]+(\.[0-9]+)*" | sort -uV | tail -n1; } || true; }
+    atmost() { [ -z "$1" ] || [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$2" ]; }
+    glibc="$(highest GLIBC)"; glibcxx="$(highest GLIBCXX)"; cxxabi="$(highest CXXABI)"
+    echo "Highest needs: $glibc $glibcxx $cxxabi"
+    atmost "$glibc" GLIBC_2.28 || fail "needs $glibc"
+    atmost "$glibcxx" GLIBCXX_3.4.25 || fail "needs $glibcxx"
+    atmost "$cxxabi" CXXABI_1.3.11 || fail "needs $cxxabi"
+    # Only system libraries every glibc Linux has, the files in this folder, and the driver's libcuda.
+    allowed="$(printf '%s\n' libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 ld-linux-x86-64.so.2 libgcc_s.so.1 libstdc++.so.6 libcuda.so.1 "${elves[@]}")"
+    for f in "${elves[@]}"; do
+      extra="$(readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | grep -vxF "$allowed" || true)"
+      [ -z "$extra" ] || fail "$f needs $extra"
+      case "$f" in libcudart.so.*|libcublas.so.*|libcublasLt.so.*) continue ;; esac
+      readelf -d "$f" | grep -q '(RPATH).*\[\$ORIGIN\]' || fail "$f has no DT_RPATH \$ORIGIN"
+    done
+    echo "$name" > /out/NAME
+
+jobs:
+  build:
+    name: Build ${{ matrix.flavor }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [cpu, cuda]
+    steps:
+      - name: Free disk space for the CUDA image
+        if: matrix.flavor == 'cuda'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Build and check in Rocky Linux 8
+        env:
+          IMAGE: ${{ matrix.flavor == 'cuda' && env.CUDA_IMAGE || env.CPU_IMAGE }}
+        run: |
+          mkdir -p out
+          printf '%s\n' "$BUILD_SH" > build.sh
+          docker run --rm -e LLAMA_TAG -e CUDA_ARCHITECTURES -v "$PWD/out:/out" -v "$PWD/build.sh:/build.sh:ro" \
+            "$IMAGE" bash /build.sh "${{ matrix.flavor }}"
+          sudo chown -R "$(id -u):$(id -g)" out
+          name="$(cat out/NAME)"
+          tar -czf "$name.tar.gz" -C out "$name"
+          sha256sum "$name.tar.gz" | tee "$name.tar.gz.sha256"
+          ls -la "$name.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.flavor }}
+          path: sublera-llama-*.tar.gz*
+          if-no-files-found: error
+          retention-days: 14
+
+  test:
+    name: Run ${{ matrix.flavor }} on ${{ matrix.image }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [cpu, cuda]
+        image: ['debian:10', 'rockylinux:8', 'ubuntu:20.04', 'debian:11', 'ubuntu:22.04']
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-${{ matrix.flavor }}
+      - name: Unpack and get a tiny model
+        run: |
+          tar -xzf sublera-llama-*.tar.gz
+          mv "$(find . -maxdepth 1 -type d -name 'sublera-llama-*')" engine
+          curl -fsSL --retry 5 -o model.gguf https://huggingface.co/ggml-org/models-moved/resolve/main/tinyllamas/stories260K.gguf
+      - name: llama-server loads and answers without a GPU
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          # Every library resolves, the bundled ones win over LD_LIBRARY_PATH, and only the driver's
+          # libcuda.so.1 is absent on a computer without an NVIDIA GPU.
+          mkdir -p decoy && : > decoy/libcublas.so.12 && : > decoy/libcudart.so.12
+          docker run --rm -v "$PWD:/w" -w /w -e LD_LIBRARY_PATH=/w/decoy -e BUILD="${LLAMA_TAG#b}" "$IMAGE" sh -c '
+            missing="$(for f in engine/llama-server engine/*.so*; do ldd "$f" 2>&1; done | grep -E "not found|decoy" | grep -v "libcuda.so.1 => not found" || true)"
+            [ -z "$missing" ] || { echo "$missing"; exit 1; }
+            ./engine/llama-server --version 2>&1 | tee version.txt
+            grep -q "build $BUILD" version.txt
+            ./engine/llama-server --list-devices'
+          docker run -d --name engine --network host -v "$PWD:/w" -w /w "$IMAGE" \
+            ./engine/llama-server -m model.gguf --host 127.0.0.1 --port 18080 --ctx-size 256
+          for i in $(seq 1 60); do curl -fs http://127.0.0.1:18080/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:18080/completion -H 'content-type: application/json' \
+            -d '{"prompt":"Once upon a time","n_predict":8,"temperature":0}' | tee answer.json
+          grep -q '"content"' answer.json
+      - name: Engine log
+        if: always()
+        run: docker logs engine 2>&1 | tail -50 || true
+
+  publish:
+    name: Publish engine-${{ inputs.llama_tag }}
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: engine-*
+          merge-multiple: true
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: sublera-llama-*.tar.gz
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          Portable llama-server builds of llama.cpp [$LLAMA_TAG](https://github.com/ggml-org/llama.cpp/releases/tag/$LLAMA_TAG)
+          for Linux x64 with glibc 2.28 or newer, made by the Engine workflow on Rocky Linux 8.
+          sublera-cli installs them when the official llama.cpp builds cannot run on a host.
+
+          The CUDA build has GPU code for compute capability 5.0 to 9.0 (Maxwell to Hopper) and PTX
+          for newer GPUs, and needs NVIDIA driver 525 or newer. It includes the NVIDIA CUDA runtime
+          libraries (libcudart, libcublas, libcublasLt), unmodified, under the NVIDIA CUDA EULA.
+          EOF
+          gh release create "engine-$LLAMA_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Engine: llama.cpp $LLAMA_TAG (portable Linux)" --notes-file notes.md --latest=false \
+            sublera-llama-*.tar.gz sublera-llama-*.tar.gz.sha256
