@@ -6,7 +6,7 @@ names, flags, `SUBLET_*` variables, `agent.json` keys, exit codes, the
 `--json` output of `doctor` and `config` (versioned by `schemaVersion`), and
 the files under `~/.sublet`. A change to any of these needs a major version.
 
-## [Unreleased]
+## [1.4.0] - 2026-11-19
 
 ### Added
 - The engine installer tries a list of llama.cpp builds for the GPU and keeps the first one that
