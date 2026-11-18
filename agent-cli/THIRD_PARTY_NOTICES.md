@@ -27,7 +27,12 @@ code is modified in this repository.
 
 - **llama.cpp / `llama-server`** — MIT. Downloaded from the official
   `ggml-org/llama.cpp` GitHub releases and checked against the published digest
-  when available.
+  when available. On older Linux, the portable builds come from this
+  repository's `engine-*` releases; they are built from official llama.cpp tags
+  by `.github/workflows/engine.yml`.
+- **NVIDIA CUDA runtime** (`libcudart`, `libcublas`, `libcublasLt`) — in the CUDA
+  builds of llama.cpp and in the portable CUDA build. These are NVIDIA
+  redistributable files under the NVIDIA CUDA Toolkit End User License Agreement.
 - **GGUF model weights** — each HuggingFace model has its own license. The CLI
   does not bundle weights and does not grant rights to any model. Hosts are
   responsible for following the model's license and acceptable-use terms.

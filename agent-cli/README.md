@@ -54,16 +54,16 @@ For subsequent examples, use `node dist/index.js` in place of `sublera` or
 `npx sublera-cli` when running from this local build.
 
 On the first run, `start` opens the Sublera website so you can connect this
-computer (click **Connect**), installs the matching `llama-server` build (CUDA
-for NVIDIA, Vulkan for AMD/Intel, Metal for Apple Silicon, CPU fallback), and
+computer (click **Connect**), installs a `llama-server` build that runs on this
+computer and finds its GPU (see [GPU engine builds](#gpu-engine-builds)), and
 then waits for work. The default server is `https://sublera.com`;
 `--server <url>` uses another Sublera server. Servers must use https, except on
 this machine (`localhost`, `127.0.0.1`); `SUBLERA_ALLOW_HTTP=1` allows plain http
 for a test server on a trusted network.
 
-`sublera doctor` checks the machine (`--fix` installs the engine ahead of time).
-It checks that the engine can start, but a model test is still needed to verify GPU inference.
-Some Linux releases need a locally built, compatible `llama-server`; set `LLAMA_SERVER` to its path.
+`sublera doctor` checks the machine (`--fix` installs the engine ahead of time,
+or replaces an engine that cannot start). It checks that the engine can start and
+that a GPU build finds the GPU, but a model test is still needed to verify GPU inference.
 `sublera login` connects the computer again; on a machine without a browser,
 open the printed link on any phone or laptop, or use `login --key sh_...`.
 
@@ -167,7 +167,8 @@ agent-cli/
 │   │   ├── sleepGuard.ts        SetThreadExecutionState / caffeinate / systemd-inhibit
 │   │   └── types.ts
 │   ├── engine/
-│   │   ├── binaryManager.ts     GitHub release picker, checksum, extraction, manifest
+│   │   ├── binaryManager.ts     GitHub release picker, checksum, extraction, manifest, build fallback
+│   │   ├── engineHost.ts        glibc / driver / Vulkan / ROCm checks, ordered list of builds
 │   │   ├── modelManager.ts      resumable download, streaming SHA-256, GGUF header
 │   │   ├── llamaRunner.ts       hidden 127.0.0.1 port, locked flags, crash restart
 │   │   └── gguf.ts              header parser + VRAM estimator
@@ -207,6 +208,57 @@ agent-cli/
 The dashboard redraws in place. Logs go to stderr, so terminal logs never
 destroy the box. `--json` switches logs to JSON lines and is suitable for
 systemd/journald.
+
+## GPU engine builds
+
+`start` and `doctor --fix` try llama.cpp builds in this order and keep the first
+one that starts and, for a GPU build, lists the GPU (`llama-server --list-devices`).
+A build that cannot run here is skipped with its reason, so a missing library or
+driver does not stop the engine.
+
+| GPU | Builds, first to last |
+|---|---|
+| NVIDIA | official CUDA 12, official CUDA 13, portable CUDA 12 (Linux x64), official Vulkan, CPU |
+| AMD | official Vulkan, official ROCm (Linux x64, needs ROCm with `libamdhip64.so.7`), CPU |
+| Intel | official Vulkan, CPU |
+| Apple Silicon | official Metal |
+| none | CPU |
+
+- Official llama.cpp Linux builds need a recent system: glibc 2.34 for the CPU and
+  Vulkan builds (Ubuntu 22.04, Debian 12) and glibc 2.38 for the CUDA and ROCm
+  builds (Ubuntu 24.04). They are skipped on older systems without a download.
+- **Portable builds** are for older Linux x64 images (glibc 2.28 or newer: Ubuntu
+  20.04/22.04, Debian 10/11/12, RHEL/Rocky 8/9), such as many hosted GPU notebooks.
+  [`engine.yml`](../.github/workflows/engine.yml) builds them from an official
+  llama.cpp tag on Rocky Linux 8 and publishes them as `engine-<tag>` releases of
+  this repository, with SHA-256 digests and build provenance. This CLI version asks
+  for `engine-b12503` first. The CUDA build (CUDA 12.4) carries the CUDA runtime,
+  needs NVIDIA driver 525 or newer, and has native code for Maxwell to Hopper GPUs
+  (compute capability 5.0 to 9.0); newer GPUs compile its PTX (driver 550 or newer).
+- Which CUDA build can run depends on the driver and the GPU (`nvidia-smi`):
+
+  | Build | Driver | Native GPU code (compute capability) | Other GPUs |
+  |---|---|---|---|
+  | official CUDA 12, Linux (CUDA 12.8) | 550 or newer | 8.6, 8.9, 12.0 | 5.0 and newer with driver 570 |
+  | official CUDA 12, Windows (CUDA 12.4) | 528 or newer | 8.6, 8.9 | 5.0 and newer with driver 551 |
+  | official CUDA 13 (CUDA 13.5) | 580 or newer | 8.6, 8.9, 10.3, 12.0, 12.1 | 7.5 and newer with driver 620 |
+  | portable CUDA 12, Linux x64 (CUDA 12.4) | 525 or newer | 5.0 to 9.0 | newer with driver 550 |
+
+- A Vulkan build needs the Vulkan loader (`libvulkan.so.1`) and a Vulkan driver.
+  In an NVIDIA container, the toolkit adds the Vulkan driver only when
+  `NVIDIA_DRIVER_CAPABILITIES` includes `graphics` (or is `all`); with
+  `compute,utility` only CUDA builds can use the GPU.
+- A build that was downloaded but could not run is deleted, and the agent does not
+  download that kind of build again for 7 days. `sublera doctor --fix` tries every
+  build again and shows each reason.
+- If only a CPU build can run on a computer with a GPU, the agent and `doctor`
+  warn. Fix the reason (for example, update the NVIDIA driver) and run
+  `sublera doctor --fix` again.
+- `SUBLERA_LLAMA_VARIANT=cuda|vulkan|rocm|metal|cpu` uses only builds of that kind,
+  and replaces an installed engine of another kind. `LLAMA_SERVER=/path/to/llama-server`
+  uses your own build as it is.
+- On Linux, `doctor` shows the glibc version, NVIDIA driver, compute capability,
+  and whether Vulkan and ROCm were found.
 
 ## Data directory
 
@@ -574,7 +626,8 @@ This build was verified on a Windows machine with an RTX 4060:
 - Real inference requires a `llama-server` build and a machine that can fit the
   requested GGUF. `--simulation` is explicitly a test mode and is labeled as
   such in the dashboard and on the wire.
-- The agent downloads official llama.cpp release assets from GitHub. If a
+- The agent downloads official llama.cpp release assets from GitHub, and on older
+  Linux the portable builds from this repository's `engine-*` releases. If a
   release has no published digest/sidecar, the agent records the local SHA-256
   and marks the install `verified: false` instead of pretending it was signed.
   Pass `--require-checksum` on `doctor` to make a missing published checksum a

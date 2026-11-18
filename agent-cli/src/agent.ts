@@ -1023,7 +1023,8 @@ export class Agent extends EventEmitter {
         });
       if (!result.found) throw new Error(result.reason);
       this.install = result.install;
-      this.logger.info('llama-server ready', { path: result.install.path, variant: result.install.variant, verified: result.install.verified });
+      this.logger.info('llama-server ready', { path: result.install.path, variant: result.install.variant, build: result.install.build, verified: result.install.verified });
+      if (result.warning) this.logger.warn(result.warning);
       const source = result.install.source;
       if (source === 'env' || source === 'path') {
         this.logger.warn(
