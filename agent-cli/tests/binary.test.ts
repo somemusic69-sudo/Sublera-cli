@@ -97,13 +97,46 @@ test('doctor --fix respects an existing instance lock before any engine mutation
 test('strict checksum mode refuses an existing custom engine without downloading', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'sublet-strict-engine-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const binary = join(dir, 'custom-engine');
-  await writeFile(binary, 'custom');
-  const env = { SUBLET_HOME: dir, LLAMA_SERVER: binary };
+  const env = { ...process.env, SUBLET_HOME: dir, LLAMA_SERVER: process.execPath };
   assert.equal((await ensureLlamaServer({ env })).found, true);
   const strict = await ensureLlamaServer({ env, fix: true, requireChecksum: true, fetchImpl: async () => { throw new Error('must not download'); } });
   assert.equal(strict.found, false);
   if (!strict.found) assert.match(strict.reason, /require-checksum/);
+});
+
+test('an engine that cannot execute is not reported ready', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-broken-engine-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binary = join(dir, 'broken-engine');
+  await writeFile(binary, 'not an executable');
+  const result = await ensureLlamaServer({ env: { ...process.env, SUBLET_HOME: dir, LLAMA_SERVER: binary } });
+  assert.equal(result.found, false);
+  if (!result.found) assert.match(result.reason, /llama-server could not start/);
+});
+
+test('doctor fails instead of reporting an unusable engine as ready', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'sublet-doctor-broken-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const binary = join(home, 'broken-engine');
+  await writeFile(binary, 'not an executable');
+  const commands = new URL('../src/commands.ts', import.meta.url).href;
+  const logger = new URL('../src/logger.ts', import.meta.url).href;
+  const code = `
+    import { cmdDoctor } from ${JSON.stringify(commands)};
+    import { Logger } from ${JSON.stringify(logger)};
+    globalThis.fetch = async () => new Response('{}', { status: 200 });
+    process.exitCode = await cmdDoctor({ fix: false, json: true, requireChecksum: false }, new Logger({ level: 'silent' }));
+  `;
+  const result = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
+    cwd: fileURLToPath(new URL('../', import.meta.url)),
+    env: { ...process.env, SUBLET_HOME: home, LLAMA_SERVER: binary, SUBLET_KEY: '' },
+    timeout: 30_000,
+  }).then(() => { throw new Error('doctor should report failure'); }, (error) => error);
+  assert.equal(result.code, 1);
+  const report = JSON.parse(result.stdout);
+  const engine = report.checks.find((item: { name: string }) => item.name === 'llama-server');
+  assert.equal(engine.status, 'fail');
+  assert.match(engine.detail, /llama-server could not start/);
 });
 
 function release(name: string, url: string, size: number) {

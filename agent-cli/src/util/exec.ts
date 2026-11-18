@@ -17,6 +17,7 @@ export type ExecOptions = {
   input?: string;
   maxOutputBytes?: number;
   windowsHide?: boolean;
+  inheritEnv?: boolean;
 };
 
 export function toError(value: unknown): Error {
@@ -32,7 +33,7 @@ export async function execFile(command: string, args: string[] = [], options: Ex
   const maxBytes = options.maxOutputBytes ?? 2 * 1024 * 1024;
   const spawnOptions: SpawnOptions = {
     cwd: options.cwd,
-    env: { ...process.env, ...options.env },
+    env: options.inheritEnv === false ? options.env : { ...process.env, ...options.env },
     windowsHide: options.windowsHide ?? true,
     stdio: ['pipe', 'pipe', 'pipe'],
   };

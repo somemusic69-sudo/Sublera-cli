@@ -10,7 +10,7 @@ import type { Logger } from './logger.js';
 import { GpuMonitor, applyGpuOverride, checkFit, type GpuOverride } from './hardware/gpuMonitor.js';
 import type { GpuStats } from './hardware/types.js';
 import { sleepGuardAvailable, SleepGuard } from './hardware/sleepGuard.js';
-import { ensureLlamaServer, findExistingLlama, variantFor } from './engine/binaryManager.js';
+import { ensureLlamaServer, findExistingLlama, probeLlamaServer, variantFor } from './engine/binaryManager.js';
 import { inspectHuggingFace, parseHfUrl } from './engine/gguf.js';
 import { readConfigFile, writeConfigFile } from './util/fs.js';
 import { fetchJson, HttpError, latestPublishedVersion, measureDownloadSpeed } from './util/http.js';
@@ -298,11 +298,14 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
     }
   }
   if (install) {
+    const problem = await probeLlamaServer(install.path);
     const own = install.source === 'env' || install.source === 'path';
     const trust = own
       ? `your own build (${install.source === 'env' ? 'LLAMA_SERVER' : 'PATH'}), not checked; a different llama.cpp build can fail model checks`
       : install.verified ? 'checksum verified' : 'local hash recorded, no published checksum';
-    checks.push(check('llama-server', install.verified ? 'ok' : flags.requireChecksum ? 'fail' : 'warn', `${install.path} · ${own ? trust : `${install.variant} · ${trust}`}`));
+    checks.push(problem
+      ? check('llama-server', 'fail', problem)
+      : check('llama-server', install.verified ? 'ok' : flags.requireChecksum ? 'fail' : 'warn', `${install.path} · ${own ? trust : `${install.variant} · ${trust}`}`));
   } else if (!flags.fix) {
     checks.push(check('llama-server', 'warn', `Not installed. Run: sublera doctor --fix (target: ${variantFor(process.platform, process.arch, gpu.primary?.vendor)})`));
   }

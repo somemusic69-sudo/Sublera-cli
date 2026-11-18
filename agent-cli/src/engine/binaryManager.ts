@@ -9,7 +9,8 @@ import { binDir, cacheDir } from '../config.js';
 import { USER_AGENT } from '../version.js';
 import { atomicWrite, pathExists, safeJoin, sha256File } from '../util/fs.js';
 import { fetchJson, type HttpError } from '../util/http.js';
-import { which } from '../util/exec.js';
+import { execFile, which } from '../util/exec.js';
+import { engineEnv } from './llamaRunner.js';
 import { ProgressBar } from '../ui/progress.js';
 import type { Logger } from '../logger.js';
 import type { GpuSnapshot, GpuVendor } from '../hardware/types.js';
@@ -399,11 +400,26 @@ export async function findExistingLlama(options: InstallOptions = {}): Promise<L
   return null;
 }
 
+/** Check the loader and shared libraries before reporting an engine as usable. */
+export async function probeLlamaServer(binary: string, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
+  const result = await execFile(binary, ['--version'], {
+    timeoutMs: 15_000, maxOutputBytes: 16_384,
+    env: engineEnv(env).env, inheritEnv: false,
+  });
+  if (result.code === 0 && !result.timedOut && !result.error) return null;
+  const detail = (result.error || result.stderr || result.stdout || `exit code ${result.code}`)
+    .replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, 600);
+  return `llama-server could not start: ${detail}. Check system libraries and install a compatible llama-server; set LLAMA_SERVER to its path.`;
+}
+
 export async function ensureLlamaServer(options: InstallOptions & { fix?: boolean; simulation?: boolean } = {}): Promise<EnsureResult> {
   if (options.simulation) return { found: false, reason: 'Simulation mode: llama-server is not needed.' };
   const existing = await findExistingLlama(options);
   if (existing) {
-    if (!options.requireChecksum || existing.verified) return { found: true, install: existing };
+    if (!options.requireChecksum || existing.verified) {
+      const problem = await probeLlamaServer(existing.path, options.env);
+      return problem ? { found: false, reason: problem } : { found: true, install: existing };
+    }
     if (!options.fix || existing.source === 'env' || existing.source === 'path') {
       return { found: false, reason: 'The existing llama-server has no verified release checksum; --require-checksum refuses it. Remove custom LLAMA_SERVER/PATH overrides and run sublera doctor --fix --require-checksum.' };
     }
@@ -411,6 +427,8 @@ export async function ensureLlamaServer(options: InstallOptions & { fix?: boolea
   if (!options.fix) return { found: false, reason: 'llama-server is not installed. Run: sublera doctor --fix' };
   try {
     const install = await installLlamaServer(options);
+    const problem = await probeLlamaServer(install.path, options.env);
+    if (problem) return { found: false, reason: problem };
     return { found: true, install };
   } catch (error) {
     return { found: false, reason: error instanceof Error ? error.message : String(error) };

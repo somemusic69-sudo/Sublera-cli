@@ -62,6 +62,8 @@ this machine (`localhost`, `127.0.0.1`); `SUBLERA_ALLOW_HTTP=1` allows plain htt
 for a test server on a trusted network.
 
 `sublera doctor` checks the machine (`--fix` installs the engine ahead of time).
+It checks that the engine can start, but a model test is still needed to verify GPU inference.
+Some Linux releases need a locally built, compatible `llama-server`; set `LLAMA_SERVER` to its path.
 `sublera login` connects the computer again; on a machine without a browser,
 open the printed link on any phone or laptop, or use `login --key sh_...`.
 

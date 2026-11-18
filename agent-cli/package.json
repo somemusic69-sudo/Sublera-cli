@@ -1,6 +1,6 @@
 {
   "name": "sublera-cli",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Sublera GPU host terminal agent: run llama.cpp, serve metered tokens, and survive overnight bookings.",
   "author": "Sublera contributors",
   "homepage": "https://github.com/somemusic69-sudo/Sublera-cli#readme",

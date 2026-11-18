@@ -1,7 +1,7 @@
 import { brandEnv } from './util/env.js';
 
 export const BRAND = 'Sublera';
-export const VERSION = '1.3.1';
+export const VERSION = '1.3.2';
 /** Lowest supported Node.js; matches "engines" in package.json (undici, used for proxies, needs 20.18.1). */
 export const MIN_NODE = '20.18.1';
 export const AGENT_NAME = 'sublera-cli';

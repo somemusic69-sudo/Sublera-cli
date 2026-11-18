@@ -8,6 +8,11 @@ the files under `~/.sublet`. A change to any of these needs a major version.
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-18
+
+### Fixed
+- Check that llama-server can start before marking it ready, and report incompatible system libraries to hosts.
+
 ## [1.3.1] - 2026-11-18
 
 ### Fixed
@@ -175,6 +180,7 @@ First release as `sublera-cli` (formerly `sublet-cli`).
 
 - First public beta on npm.
 
-[Unreleased]: https://github.com/somemusic69-sudo/Sublera-cli/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/somemusic69-sudo/Sublera-cli/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/somemusic69-sudo/Sublera-cli/releases/tag/v1.3.2
 [1.3.1]: https://github.com/somemusic69-sudo/Sublera-cli/releases/tag/v1.3.1
 [1.3.0]: https://github.com/somemusic69-sudo/Sublera-cli/releases/tag/v1.3.0
