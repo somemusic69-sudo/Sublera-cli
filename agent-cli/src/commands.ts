@@ -10,8 +10,8 @@ import type { Logger } from './logger.js';
 import { GpuMonitor, applyGpuOverride, checkFit, type GpuOverride } from './hardware/gpuMonitor.js';
 import type { GpuStats } from './hardware/types.js';
 import { sleepGuardAvailable, SleepGuard } from './hardware/sleepGuard.js';
-import { ensureLlamaServer, findExistingLlama, probeLlamaServer, variantFor, type LlamaInstall } from './engine/binaryManager.js';
-import { detectEngineHost, engineCandidates, parseVariant, type EngineHost } from './engine/engineHost.js';
+import { CPU_ON_GPU_HELP, cpuEngineOnGpuHost, ensureLlamaServer, findExistingLlama, probeLlamaServer, variantFor, type LlamaInstall } from './engine/binaryManager.js';
+import { detectEngineHost, engineCandidates, type EngineHost } from './engine/engineHost.js';
 import { inspectHuggingFace, parseHfUrl } from './engine/gguf.js';
 import { readConfigFile, writeConfigFile } from './util/fs.js';
 import { fetchJson, HttpError, latestPublishedVersion, measureDownloadSpeed } from './util/http.js';
@@ -335,11 +335,6 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
   if (probe && install) {
     problem = await probeLlamaServer(install.path, process.env, install.variant, host);
     if (problem && install.source !== 'env') problem += ' Run: sublera doctor --fix to try other engine builds.';
-    const vendor = gpu.primary?.vendor;
-    if (!problem && !warning && install.source === 'manifest' && install.variant === 'cpu' && (vendor === 'nvidia' || vendor === 'amd' || vendor === 'intel')
-        && parseVariant(brandEnv(process.env, 'SUBLET_LLAMA_VARIANT')) !== 'cpu') {
-      warning = `CPU build on a computer with a ${gpu.primary?.name || 'GPU'}: no GPU build could run here. Run: sublera doctor --fix to see why and to try the GPU builds again.`;
-    }
   }
   if (install) {
     const own = install.source === 'env' || install.source === 'path';
@@ -349,6 +344,8 @@ export async function cmdDoctor(flags: GlobalFlags, logger: Logger): Promise<num
     const build = `${install.build === 'portable' ? 'portable ' : ''}${install.variant}${install.cuda ? ` ${install.cuda}` : ''}`;
     checks.push(problem
       ? check('llama-server', 'fail', problem)
+      : cpuEngineOnGpuHost(install, gpu)
+        ? check('llama-server', 'fail', `${install.path} · ${warning ?? `CPU build on a computer with a ${gpu.primary?.name || 'GPU'}; run sublera doctor --fix to see why no GPU build runs.`} ${CPU_ON_GPU_HELP}`)
       : warning
         ? check('llama-server', 'warn', `${install.path} · ${warning}`)
         : check('llama-server', install.verified ? 'ok' : flags.requireChecksum ? 'fail' : 'warn', `${install.path} · ${own ? trust : `${build} · ${trust}`}`));

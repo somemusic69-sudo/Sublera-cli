@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import AdmZip from 'adm-zip';
-import { installLlamaServer, pickReleaseAsset, variantFor, findExistingLlama, verifyInstalledBinary, ensureLlamaServer } from '../src/engine/binaryManager.js';
+import { installLlamaServer, pickReleaseAsset, variantFor, findExistingLlama, verifyInstalledBinary, ensureLlamaServer, cpuEngineOnGpuHost, ENGINE_TAG, LLAMA_TAG } from '../src/engine/binaryManager.js';
 
 test('concurrent installs serialize per home, reuse validated installs, and retain all manifest entries', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'sublet-concurrent-bin-'));
@@ -419,7 +419,7 @@ test('a GPU build that cannot start or finds no GPU is skipped for the next buil
   const { server, base } = await serveFiles({ '/broken.zip': broken, '/blind.zip': blind, '/cpu.zip': cpu });
   t.after(() => { server.close(); });
   const env = { ...process.env, SUBLET_HOME: home, LLAMA_SERVER: '', SUBLERA_LLAMA_VARIANT: '', SUBLET_LLAMA_VARIANT: '' };
-  const assets = (cuda: string) => ({ tag_name: 'b1', assets: [
+  const assets = (cuda: string) => ({ tag_name: ENGINE_TAG, assets: [
     { name: 'sublera-llama-b1-linux-cuda-12.8-x64.zip', browser_download_url: `${base}/${cuda}.zip` },
     { name: 'sublera-llama-b1-linux-cpu-x64.zip', browser_download_url: `${base}/cpu.zip` },
   ] });
@@ -438,12 +438,12 @@ test('a GPU build that cannot start or finds no GPU is skipped for the next buil
   assert.match(manifest.failed['portable-cuda12'].reason, /could not start/);
   assert.equal(manifest.installs.length, 1);
   assert.deepEqual((await readdir(join(home, 'bin'))).filter((name) => name.includes('cuda')), []);
-  const again = await ensureLlamaServer({ ...onLinux, env, fix: true, release: { ...assets('blind'), tag_name: 'b2' } });
+  const again = await ensureLlamaServer({ ...onLinux, env, fix: true, release: assets('blind') });
   assert.equal(again.found && again.install.path, first.install.path);
   assert.match(again.found ? again.warning! : '', /portable CUDA 12 build: failed here on .*sublera doctor --fix tries it again/);
 
   // doctor --fix tries it again; a build that finds no GPU is not used either.
-  const second = await ensureLlamaServer({ ...onLinux, env, fix: true, retryFailed: true, release: { ...assets('blind'), tag_name: 'b2' } });
+  const second = await ensureLlamaServer({ ...onLinux, env, fix: true, retryFailed: true, release: assets('blind') });
   assert.equal(second.found, true);
   if (!second.found) return;
   assert.equal(second.install.path, first.install.path);
@@ -467,7 +467,7 @@ test('a GPU build that finds the GPU becomes the engine', { skip: process.platfo
   const { server, base, requests } = await serveFiles({ '/gpu.zip': gpu });
   t.after(() => { server.close(); });
   const env = { ...process.env, SUBLET_HOME: home, LLAMA_SERVER: '', SUBLERA_LLAMA_VARIANT: '', SUBLET_LLAMA_VARIANT: '' };
-  const release = { tag_name: 'engine-b1', assets: [{ name: 'sublera-llama-b1-linux-cuda-12.8-x64.zip', browser_download_url: `${base}/gpu.zip` }] };
+  const release = { tag_name: ENGINE_TAG, assets: [{ name: 'sublera-llama-b12503-linux-cuda-12.4-x64.zip', browser_download_url: `${base}/gpu.zip` }] };
   const result = await ensureLlamaServer({ ...onLinux, env, fix: true, release });
   assert.equal(result.found, true);
   if (!result.found) return;
@@ -494,14 +494,11 @@ test('no usable build gives every reason in one message', async (t) => {
   assert.equal(result.found, false);
   if (result.found) return;
   assert.match(result.reason, /^No llama\.cpp build can run on this computer\./);
-  assert.match(result.reason, /portable CUDA 12 build: No portable CUDA 12 build is published yet for linux\/x64/);
+  assert.match(result.reason, /portable CUDA 12 build: No portable CUDA 12 build is published in engine-b12503 for linux\/x64/);
   assert.match(result.reason, /official Vulkan build: skipped, needs glibc 2\.34 or newer/);
   assert.match(result.reason, /set LLAMA_SERVER/);
-  // The pinned engine release is asked for first, then the release list, each once.
-  assert.deepEqual(urls, [
-    'https://api.github.com/repos/somemusic69-sudo/Sublera-cli/releases/tags/engine-b12503',
-    'https://api.github.com/repos/somemusic69-sudo/Sublera-cli/releases?per_page=100',
-  ]);
+  // Only the engine release of this CLI version is asked for, once.
+  assert.deepEqual(urls, ['https://api.github.com/repos/somemusic69-sudo/Sublera-cli/releases/tags/engine-b12503']);
 });
 
 test('a GitHub rate limit is reported as such, not as a missing build', async (t) => {
@@ -516,24 +513,51 @@ test('a GitHub rate limit is reported as such, not as a missing build', async (t
   assert.match(result.found ? '' : result.reason, /portable CUDA 12 build: Could not read the Sublera engine releases: the GitHub API rate limit was reached/);
 });
 
-test('a portable build is found in a newer engine release from the release list', { skip: process.platform === 'win32' }, async (t) => {
-  const home = await mkdtemp(join(tmpdir(), 'sublet-engine-list-'));
+test('only the llama.cpp release of this CLI version is installed, and an older engine is replaced', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'sublet-pinned-'));
   t.after(() => rm(home, { recursive: true, force: true }));
-  const bytes = zipWith('llama-server', fakeEngine(['CUDA0: NVIDIA RTX A6000 (48669 MiB, 48000 MiB free)']));
   const env = { ...process.env, SUBLET_HOME: home, LLAMA_SERVER: '', SUBLERA_LLAMA_VARIANT: '', SUBLET_LLAMA_VARIANT: '' };
-  const list = [
-    { tag_name: 'v9.9.9', assets: [{ name: 'sublera-cli-v9.9.9.cdx.json', browser_download_url: 'https://x/sbom' }] },
-    { tag_name: 'engine-b99999', assets: [{ name: 'sublera-llama-b99999-linux-cuda-12.4-x64.zip', browser_download_url: 'https://x/engine.zip', digest: `sha256:${sha256(bytes)}` }] },
-  ];
-  const result = await ensureLlamaServer({
-    ...onLinux, env, fix: true,
-    fetchImpl: async (url) => String(url).includes('/tags/') ? new Response('{}', { status: 404 })
-      : String(url).includes('?per_page=100') ? new Response(JSON.stringify(list), { status: 200 })
-        : String(url) === 'https://x/engine.zip' ? new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.length) } })
-          : new Response('[]', { status: 200 }),
-  });
+  const host = { ...oldLinux, vendor: null };
+  const options = { platform: 'linux' as const, arch: 'x64', host, showProgress: false };
+  const bytes = zipWith('llama-server', fakeEngine([]));
+  const old = await installLlamaServer({ ...options, env, candidate: { variant: 'cpu', source: 'portable', label: 'portable CPU build' }, release: {
+    tag_name: 'engine-b11111', assets: [{ name: 'sublera-llama-b11111-linux-cpu-x64.zip', browser_download_url: 'https://x/old.zip', digest: `sha256:${sha256(bytes)}` }],
+  }, fetchImpl: async () => new Response(bytes, { status: 200 }) });
+  assert.equal((await findExistingLlama({ env }))?.path, old.path);
+
+  // Without the new release, the older engine keeps working, with a warning.
+  const offline = await ensureLlamaServer({ ...options, env, fix: true, fetchImpl: async () => new Response('{}', { status: 404 }) });
+  assert.equal(offline.found && offline.install.path, old.path);
+  assert.match(offline.found ? offline.warning! : '', /Kept llama-server from llama\.cpp engine-b11111, because no build of engine-b12503 could be installed/);
+  // Without --fix, it is used with a warning.
+  const plain = await ensureLlamaServer({ ...options, env });
+  assert.match(plain.found ? plain.warning! : '', /not engine-b12503 as this CLI version expects/);
+
+  const urls: string[] = [];
+  const release = { tag_name: ENGINE_TAG, assets: [{ name: 'sublera-llama-b12503-linux-cpu-x64.zip', browser_download_url: 'https://x/new.zip', digest: `sha256:${sha256(bytes)}` }] };
+  const result = await ensureLlamaServer({ ...options, env, fix: true, fetchImpl: async (url) => {
+    urls.push(String(url));
+    return String(url) === 'https://x/new.zip' ? new Response(bytes, { status: 200 }) : new Response(JSON.stringify(release), { status: 200 });
+  } });
   assert.equal(result.found, true);
   if (!result.found) return;
-  assert.equal(result.install.version, 'engine-b99999');
-  assert.equal(result.install.verified, true);
+  assert.equal(result.install.version, ENGINE_TAG);
+  assert.equal(result.warning, undefined);
+  assert.deepEqual(urls, [`https://api.github.com/repos/somemusic69-sudo/Sublera-cli/releases/tags/${ENGINE_TAG}`, 'https://x/new.zip']);
+  await assert.rejects(stat(old.path));
+  assert.equal(LLAMA_TAG, ENGINE_TAG.replace(/^engine-/, ''));
+});
+
+test('a CPU engine that Sublera installed on a GPU host does not serve unless the host asks for the CPU', () => {
+  const install = { path: '/x/llama-server', version: LLAMA_TAG, variant: 'cpu' as const, sha256: null, verified: true, source: 'manifest' as const };
+  const gpu = (vendor: string) => ({ primary: { vendor, name: 'GPU' } as never, gpus: [], source: 'test', platform: 'linux' as const, checkedAt: 0, warnings: [] });
+  assert.equal(cpuEngineOnGpuHost(install, gpu('nvidia'), {}), true);
+  assert.equal(cpuEngineOnGpuHost(install, gpu('amd'), {}), true);
+  assert.equal(cpuEngineOnGpuHost(install, gpu('nvidia'), { SUBLERA_LLAMA_VARIANT: 'cpu' }), false);
+  assert.equal(cpuEngineOnGpuHost(install, gpu('nvidia'), { SUBLET_LLAMA_VARIANT: 'CPU' }), false);
+  assert.equal(cpuEngineOnGpuHost(install, gpu('apple'), {}), false);
+  assert.equal(cpuEngineOnGpuHost(install, null, {}), false);
+  assert.equal(cpuEngineOnGpuHost({ ...install, variant: 'cuda' }, gpu('nvidia'), {}), false);
+  // A host's own build is not known to be a CPU build.
+  assert.equal(cpuEngineOnGpuHost({ ...install, source: 'env' }, gpu('nvidia'), {}), false);
 });
