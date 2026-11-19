@@ -39,6 +39,7 @@ const BOOLEAN_FLAGS: Record<string, keyof GlobalFlags> = {
   '--require-checksum': 'requireChecksum',
   '--no-browser': 'noBrowser',
   '--non-interactive': 'nonInteractive',
+  '--list': 'list',
   '--help': 'help',
   '--version': 'version',
 };

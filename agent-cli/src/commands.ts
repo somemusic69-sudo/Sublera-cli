@@ -13,7 +13,8 @@ import { sleepGuardAvailable, SleepGuard } from './hardware/sleepGuard.js';
 import { CPU_ON_GPU_HELP, cpuEngineOnGpuHost, ensureLlamaServer, findExistingLlama, probeLlamaServer, variantFor, type LlamaInstall } from './engine/binaryManager.js';
 import { detectEngineHost, engineCandidates, type EngineHost } from './engine/engineHost.js';
 import { inspectHuggingFace, parseHfUrl } from './engine/gguf.js';
-import { readConfigFile, writeConfigFile } from './util/fs.js';
+import { pathExists, readConfigFile, writeConfigFile } from './util/fs.js';
+import { catalogTable, fetchCatalog, findCatalogModel, fitsGpu, hostCommand, parsePriceAnswer, supplyText, type CatalogEntry } from './hostMenu.js';
 import { fetchJson, HttpError, latestPublishedVersion, measureDownloadSpeed } from './util/http.js';
 import { execFile, sleep, toError } from './util/exec.js';
 import { canOpenBrowser, openUrl, printable } from './util/open.js';
@@ -56,6 +57,8 @@ export type GlobalFlags = {
   requireChecksum: boolean;
   noBrowser: boolean;
   nonInteractive?: boolean;
+  /** host: print the models a host can serve, then exit. */
+  list?: boolean;
   drainTimeoutMs?: number;
   logLevel?: string;
   logFile?: string;
@@ -416,11 +419,25 @@ export async function cmdStart(flags: GlobalFlags, logger: Logger): Promise<numb
   return await runAgent(agent, logger, requestId);
 }
 
+const HOST_USAGE = 'Usage: sublera host <model-id|huggingface-gguf-url|path.gguf> --price 0.25 --price-hour 0.5\nRun sublera host --list to see the model ids, or sublera host in a terminal to pick from a list.';
+
 export async function cmdHost(flags: GlobalFlags, logger: Logger): Promise<number> {
-  const model = flags.model || flags.positionals[0];
-  if (!model) throw new UsageError('Usage: sublera host <huggingface-gguf-url|path.gguf> --price 0.25');
+  if (flags.list) return listHostModels(flags);
+  let model = flags.model || flags.positionals[0];
+  const interactive = !flags.nonInteractive && Boolean(input.isTTY);
+  if (!model && !interactive) throw new UsageError(HOST_USAGE);
   // Fail before model inspection or download when unattended credentials are missing.
   const cfg = await readyConfig(flags, logger);
+  if (!model) {
+    const picked = await pickHostModel(cfg.server, flags);
+    if (!picked) return 0;
+    model = picked.hfUrl;
+  } else if (!/^https?:\/\//i.test(model) && !(await pathExists(model))) {
+    // A short id from the server's list, such as llama-3.1-8b.
+    const known = findCatalogModel(model, await fetchCatalog(cfg.server));
+    if (!known) throw new UsageError(`Unknown model "${model}". Run sublera host --list to see the model ids, or give a Hugging Face GGUF URL or a .gguf file.`);
+    model = known.hfUrl;
+  }
   if (!flags.simulation && !/^https?:\/\//i.test(model)) {
     try {
       await stat(model);
@@ -531,6 +548,65 @@ async function runAgent(agent: Agent, logger: Logger, target: string | null = nu
   return exitCode;
 }
 
+
+/** `sublera host --list`: the models a host can serve, whether each fits this GPU, and what other GPUs ask now. */
+async function listHostModels(flags: GlobalFlags): Promise<number> {
+  const server = (await resolvedConfig(flags, false)).server;
+  const catalog = await fetchCatalog(server);
+  if (flags.json) {
+    output.write(`${JSON.stringify({ server, models: catalog }, null, 2)}\n`);
+    return 0;
+  }
+  const gpu = applyGpuOverride(await new GpuMonitor().scan(true), gpuOverrideFrom(flags)).primary;
+  output.write(`\nModels you can host on ${server}\n${gpu ? `Your GPU: ${gpu.name}${gpu.totalVramMb ? `, ${(gpu.totalVramMb / 1024).toFixed(0)} GB` : ''}\n` : ''}\n`);
+  output.write(`${catalogTable(catalog, gpu?.totalVramMb ?? null)}\n\nRun: sublera host <id> --price <usd per 1M tokens> --price-hour <usd per hour>\n`);
+  return 0;
+}
+
+/**
+ * The menu of `sublera host` without a model: pick a model by its number or id, then set both prices with what other
+ * GPUs ask in view. Prices given as flags are not asked again. Returns null when the host leaves without a pick.
+ */
+async function pickHostModel(server: string, flags: GlobalFlags): Promise<CatalogEntry | null> {
+  const [catalog, snapshot] = await Promise.all([fetchCatalog(server), new GpuMonitor().scan(true)]);
+  if (!catalog.length) throw new Error(`${server} lists no models. Give a Hugging Face GGUF URL instead: sublera host <url>`);
+  const gpu = applyGpuOverride(snapshot, gpuOverrideFrom(flags)).primary;
+  const vram = gpu?.totalVramMb ?? null;
+  output.write(`\nPick a model to host. Buyers pay you per 1M tokens, or rent your full GPU by the hour.\n`);
+  output.write(`${gpu ? `Your GPU: ${gpu.name}${vram ? `, ${(vram / 1024).toFixed(0)} GB` : ''}\n` : ''}\n${catalogTable(catalog, vram)}\n\n`);
+  const rl = createInterface({ input, output });
+  try {
+    let picked: CatalogEntry | null = null;
+    while (!picked) {
+      const answer = (await rl.question('Host which model? Type its number or id, or press Enter to stop: ')).trim();
+      if (!answer) return null;
+      picked = /^\d+$/.test(answer) ? catalog[Number(answer) - 1] ?? null : findCatalogModel(answer, catalog);
+      if (!picked) { output.write('That is not on the list.\n'); continue; }
+      if (fitsGpu(picked, vram) === false) {
+        const go = (await rl.question(`${picked.label} needs about ${(picked.minVramMb / 1024).toFixed(1)} GB and your GPU has ${(vram! / 1024).toFixed(0)} GB. Host it anyway? (y/N) `)).trim();
+        if (!/^y(es)?$/i.test(go)) picked = null;
+      }
+    }
+    const ask = async (question: string, fallback: number): Promise<number> => {
+      for (;;) {
+        const value = parsePriceAnswer(await rl.question(question), fallback);
+        if (value != null) return value;
+        output.write('Type a price from 0 to 50, or press Enter for the default.\n');
+      }
+    };
+    const others = picked.hosts ? ` Other GPUs: ${supplyText(picked)}.` : ' No other GPU hosts it now.';
+    if (flags.price == null && flags.priceOut == null) {
+      flags.price = await ask(`Price per 1M output tokens in USD (input costs half).${others} [0.25]: `, 0.25);
+    }
+    if (flags.priceHour == null) {
+      flags.priceHour = await ask('Price per hour for your full GPU in USD, 0 = no hourly rentals [0.50]: ', 0.5);
+    }
+    output.write(`\nNext time, run: ${hostCommand(picked.id, flags.price ?? flags.priceOut ?? 0.25, flags.priceHour)}\n\n`);
+    return picked;
+  } finally {
+    rl.close();
+  }
+}
 export async function cmdJobs(flags: GlobalFlags, logger: Logger): Promise<number> {
   const cfg = await readyConfig(flags, logger);
   const monitor = new GpuMonitor();
@@ -841,7 +917,8 @@ export function globalHelp(): string {
     '  login                 Link this computer to your Sublera account (opens the website)',
     '  doctor                Scan GPU, server, sleep guard, and llama.cpp',
     '  start [code]          Connect and serve (connects this computer on the first run); with a code, serve that request',
-    '  host <gguf>           Serve a public model: per 1M tokens, plus hourly rentals of the GPU',
+    '  host [model]          Serve a model with no request: per 1M tokens, plus hourly rentals of the GPU.',
+    '                        No model: pick from a list. --list prints the model ids',
     '  jobs                  Browse and claim buyer requests from the terminal',
     '  status                Show this host, wallet, and every active booking',
     '  health [live|ready]    Local fresh process/serving readiness (JSON; no server attestation)',
