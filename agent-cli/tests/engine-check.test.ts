@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +12,7 @@ process.env.SUBLET_HOME = HOME;
 const { Agent } = await import('../src/agent.js');
 const { Logger } = await import('../src/logger.js');
 const { buildGgufSample } = await import('../src/engine/gguf.js');
+const { LLAMA_TAG } = await import('../src/engine/binaryManager.js');
 
 const FIXTURE = join(process.cwd(), 'tests', 'fixtures', 'fake-llama-server.mjs');
 const MODEL = join(HOME, 'tiny-Q4_K_M.gguf');
@@ -138,6 +140,9 @@ test('llama-server restarts for a new slot count only while idle, and a running 
     const model = await internals.loadModel(MODEL, { context: 2048, requestId: null });
     const first = internals.runner;
     assert.ok(first);
+    // The server learns which build serves; a host's own build is reported as custom.
+    const engine = { variant: null, build: 'custom', version: null, cuda: null, gpu: null, verified: false };
+    assert.deepEqual((agent as unknown as { helloPayload(): { engine: unknown } }).helloPayload().engine, engine);
     assert.equal(internals.runnerSlotCount, 1);
     // A job is running: a new slot count keeps the current engine and only warns.
     internals.activeJobs.set('busy', { controller: new AbortController() });
@@ -163,5 +168,33 @@ test('llama-server restarts for a new slot count only while idle, and a running 
     assert.equal(internals.runner, second);
   } finally {
     await agent.stop();
+  }
+});
+
+test('a CPU engine that Sublera installed on a GPU host does not load a model', { skip: process.platform === 'win32' }, async () => {
+  const bin = join(HOME, 'bin');
+  const dir = join(bin, `llama-${LLAMA_TAG}-cpu`);
+  const path = join(dir, 'llama-server');
+  await mkdir(dir, { recursive: true });
+  await writeFile(path, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const binarySha256 = createHash('sha256').update(await readFile(path)).digest('hex');
+  await writeFile(join(bin, 'manifest.json'), JSON.stringify({ latest: path, installs: [{ path, dir, version: LLAMA_TAG, variant: 'cpu', build: 'official', sha256: null, binarySha256, verified: true, source: 'download' }] }));
+  const stream = { isTTY: false, write: () => true } as unknown as NodeJS.WriteStream;
+  const agent = new Agent({
+    config: { server: 'http://127.0.0.1:1', token: 'sh_test', wsPath: '/tunnel', updatedAt: 0 },
+    logger: new Logger({ level: 'silent', json: true, color: false, stream }),
+    simulation: false,
+    publicMode: false,
+    context: 2048,
+    json: true,
+    autoInstall: false,
+    gpuOverride: { name: 'NVIDIA RTX A6000', vramMb: 49_140 },
+  });
+  const internals = agent as unknown as { loadModel(input: string, opts: { context: number; requestId: string | null }): Promise<unknown> };
+  try {
+    await assert.rejects(internals.loadModel(MODEL, { context: 2048, requestId: null }), /does not serve on the CPU of a computer with a GPU.*SUBLERA_LLAMA_VARIANT=cpu/);
+  } finally {
+    await agent.stop();
+    await rm(bin, { recursive: true, force: true });
   }
 });

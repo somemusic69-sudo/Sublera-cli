@@ -61,6 +61,19 @@ export type ServerMessage =
 
 export type CachedModelInfo = { sha256: string; file: string; sizeBytes: number };
 
+/** The llama-server build that serves jobs, so the server can compare hosts that run the same build. */
+export type EngineReport = {
+  /** null for a host's own build (LLAMA_SERVER or PATH), whose kind is not known. */
+  variant: 'cuda' | 'vulkan' | 'rocm' | 'metal' | 'cpu' | null;
+  build: 'official' | 'portable' | 'custom';
+  /** The llama.cpp release, such as "b12503" (portable builds: "engine-b12503"); null for a custom build. */
+  version: string | null;
+  cuda: number | null;
+  /** The engine runs on the GPU; null when not known (custom build). */
+  gpu: boolean | null;
+  verified: boolean;
+};
+
 export type HelloPayload = {
   type: 'hello';
   agentVersion: string;
@@ -92,6 +105,8 @@ export type HelloPayload = {
   /** Set by `sublera start <code>`: the request this agent wants to serve. */
   requestId?: string | null;
   cachedModels?: CachedModelInfo[];
+  /** null until the engine is installed (it is installed at the first model load). */
+  engine?: EngineReport | null;
 };
 
 export type HeartbeatPayload = {
@@ -109,6 +124,7 @@ export type HeartbeatPayload = {
   gpuUtilPct: number | null;
   freeVramMb: number;
   slotsUsed: number;
+  engine?: EngineReport | null;
 };
 
 export type WalletView = {

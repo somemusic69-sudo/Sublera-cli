@@ -6,6 +6,22 @@ names, flags, `SUBLET_*` variables, `agent.json` keys, exit codes, the
 `--json` output of `doctor` and `config` (versioned by `schemaVersion`), and
 the files under `~/.sublet`. A change to any of these needs a major version.
 
+## [1.5.0] - 2026-11-19
+
+### Added
+- `hello` and `heartbeat` carry `engine`: the kind of llama-server build (CUDA, Vulkan, ROCm, Metal,
+  CPU or a host's own build), its llama.cpp release, and whether it runs on the GPU. The server can
+  then compare model checks between hosts that run the same build.
+
+### Changed
+- Each CLI version installs one llama.cpp release: official builds of `b12503` and portable builds of
+  `engine-b12503`. Before, a new install took the newest llama.cpp pre-release, so hosts ran
+  different, untested engines. An engine from another release is replaced at the next install and
+  kept until its replacement runs.
+- On a computer with a GPU, an engine that can run only on the CPU no longer loads models, and
+  `doctor` fails instead of warning. Before, such a host served at CPU speed while it showed its GPU
+  to buyers. `SUBLERA_LLAMA_VARIANT=cpu` allows serving on the CPU.
+
 ## [1.4.0] - 2026-11-19
 
 ### Added

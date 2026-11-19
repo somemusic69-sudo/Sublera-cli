@@ -81,15 +81,17 @@ type Manifest = {
 };
 
 const RELEASE_CACHE_MS = 6 * 60 * 60 * 1000;
-const RELEASE_URL = 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest';
-const RELEASE_LIST_URL = 'https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20';
-const RELEASE_URL_FALLBACK = 'https://api.github.com/repos/ggerganov/llama.cpp/releases/latest';
 /**
- * Portable Linux builds made by .github/workflows/engine.yml, published as `engine-<llama.cpp tag>`
- * releases. This CLI version asks for ENGINE_TAG first, and for the newest engine release after it.
+ * The llama.cpp release this CLI version installs. Every host of one CLI version runs the same
+ * engine, because the server compares token probabilities between hosts. To move to a newer
+ * llama.cpp, run the Engine workflow for the new tag first, then change LLAMA_TAG and ENGINE_TAG
+ * together in a CLI release.
  */
-export const ENGINE_TAG = 'engine-b12503';
-const ENGINE_REPO_API = 'https://api.github.com/repos/somemusic69-sudo/Sublera-cli/releases';
+export const LLAMA_TAG = 'b12503';
+const LLAMA_RELEASE_URL = `https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/${LLAMA_TAG}`;
+/** Portable Linux builds of LLAMA_TAG made by .github/workflows/engine.yml. */
+export const ENGINE_TAG = `engine-${LLAMA_TAG}`;
+const ENGINE_RELEASE_URL = `https://api.github.com/repos/somemusic69-sudo/Sublera-cli/releases/tags/${ENGINE_TAG}`;
 /** A failed engine build is not downloaded again for this long, except by `doctor --fix`. */
 const FAILED_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -204,32 +206,25 @@ async function fetchRelease(options: InstallOptions, platform: NodeJS.Platform, 
   if (options.release) return options.release;
   const env = options.env ?? process.env;
   const cacheKey = `${platform}-${arch}-${candidateKey(candidate)}`;
-  const cached = await readReleaseCache(env, cacheKey);
-  if (cached && pickReleaseAsset(cached, platform, arch, candidate).main) return cached;
-  const fetchImpl = options.fetchImpl ?? fetch;
   const portable = candidate.source === 'portable';
-  // llama.cpp publishes its builds as pre-releases, which "latest" does not return.
-  const urls = portable
-    ? [`${ENGINE_REPO_API}/tags/${ENGINE_TAG}`, `${ENGINE_REPO_API}?per_page=100`]
-    : [RELEASE_LIST_URL, RELEASE_URL, RELEASE_URL_FALLBACK];
+  const tag = portable ? ENGINE_TAG : LLAMA_TAG;
+  const cached = await readReleaseCache(env, cacheKey);
+  if (cached?.tag_name === tag && pickReleaseAsset(cached, platform, arch, candidate).main) return cached;
+  const fetchImpl = options.fetchImpl ?? fetch;
   let release: ReleaseInfo | null = null;
   let problem: string | null = null;
-  for (const url of urls) {
-    try {
-      const list = await releaseList(url, fetchImpl);
-      release = list.find((item) => item?.tag_name && Array.isArray(item.assets) && item.assets.length > 0
-        && (!portable || item.tag_name.startsWith('engine-'))
-        && pickReleaseAsset(item, platform, arch, candidate).main) || null;
-      if (release) break;
-    } catch (error) {
-      problem ??= error instanceof Error ? error.message : String(error);
-    }
+  try {
+    const list = await releaseList(portable ? ENGINE_RELEASE_URL : LLAMA_RELEASE_URL, fetchImpl);
+    release = list.find((item) => item?.tag_name === tag && Array.isArray(item.assets)
+      && pickReleaseAsset(item, platform, arch, candidate).main) || null;
+  } catch (error) {
+    problem = error instanceof Error ? error.message : String(error);
   }
   if (!release) {
     if (problem) throw new Error(`Could not read the ${portable ? 'Sublera engine' : 'llama.cpp'} releases: ${problem}`);
     throw new Error(portable
-      ? `No ${candidate.label} is published yet for ${platform}/${arch}`
-      : `No llama.cpp release with a ${candidate.label} was found for ${platform}/${arch}`);
+      ? `No ${candidate.label} is published in ${ENGINE_TAG} for ${platform}/${arch}`
+      : `llama.cpp ${LLAMA_TAG} has no ${candidate.label} for ${platform}/${arch}`);
   }
   await mkdir(cacheDir(env), { recursive: true });
   await writeFile(releaseCachePath(env, cacheKey), JSON.stringify({ fetchedAt: Date.now(), release }), 'utf8');
@@ -497,6 +492,25 @@ export async function probeLlamaServer(binary: string, env: NodeJS.ProcessEnv = 
   return `llama-server started, but its ${GPU_NAMES[variant]} backend found no GPU${log ? ` (${log})` : ''}.${hint ? ` ${hint}` : ''}`;
 }
 
+/** The release an installed build should come from: the build of this CLI version. */
+function pinnedVersion(install: LlamaInstall): string {
+  return install.build === 'portable' ? ENGINE_TAG : LLAMA_TAG;
+}
+
+/**
+ * A CPU engine that Sublera installed on a computer with a GPU. Buyers choose a host by its GPU,
+ * so such a host does not serve unless the host asked for the CPU (SUBLERA_LLAMA_VARIANT=cpu).
+ */
+export function cpuEngineOnGpuHost(install: LlamaInstall, gpu: GpuSnapshot | null | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+  const vendor = gpu?.primary?.vendor;
+  return install.variant === 'cpu' && (install.source === 'manifest' || install.source === 'download')
+    && (vendor === 'nvidia' || vendor === 'amd' || vendor === 'intel')
+    && parseVariant(brandEnv(env, 'SUBLET_LLAMA_VARIANT')) !== 'cpu';
+}
+
+export const CPU_ON_GPU_HELP = 'Sublera does not serve on the CPU of a computer with a GPU, because buyers choose a host by its GPU. '
+  + 'Fix the GPU build problem and run: sublera doctor --fix. To serve on the CPU anyway, set SUBLERA_LLAMA_VARIANT=cpu.';
+
 function describeInstall(install: LlamaInstall): string {
   if (install.source === 'env') return 'LLAMA_SERVER';
   if (install.source === 'path') return 'llama-server on PATH';
@@ -534,6 +548,9 @@ export async function ensureLlamaServer(options: EnsureOptions = {}): Promise<En
     const text = [badVariant, warning].filter(Boolean).join(' ');
     return { found: true, install, ...(text ? { warning: text } : {}) };
   };
+  // An engine from another llama.cpp release than this CLI version installs (for example one
+  // installed by an older version) is replaced, but kept until its replacement runs.
+  const outdated = Boolean(existing?.source === 'manifest' && !options.candidate && existing.version !== pinnedVersion(existing));
   if (existing) {
     // An installed build of another kind than SUBLERA_LLAMA_VARIANT asks for is replaced.
     const wrongKind = Boolean(forced && existing.source === 'manifest' && existing.variant !== forced && !options.candidate);
@@ -545,8 +562,11 @@ export async function ensureLlamaServer(options: EnsureOptions = {}): Promise<En
     } else if (!options.requireChecksum || existing.verified) {
       const problem = await probeLlamaServer(existing.path, env, existing.variant, existing.source === 'manifest' ? await getHost() : null);
       if (!problem) {
+        if (outdated && !options.fix) {
+          return found(existing, `llama-server is from llama.cpp ${existing.version}, not ${pinnedVersion(existing)} as this CLI version expects; another build can fail model checks. Run: sublera doctor --fix`);
+        }
         // A CPU build from an earlier install is kept, but a GPU build is tried first when one can run.
-        if (!(options.fix && gpuHost && existing.source === 'manifest' && existing.variant === 'cpu' && !options.candidate)) {
+        if (!outdated && !(options.fix && gpuHost && existing.source === 'manifest' && existing.variant === 'cpu' && !options.candidate)) {
           return found(existing);
         }
         fallback = existing;
@@ -577,7 +597,7 @@ export async function ensureLlamaServer(options: EnsureOptions = {}): Promise<En
   const failed = (await readManifest(env)).failed ?? {};
   const skipped = plan.skipped.map((s) => `${s.label}: skipped, ${s.reason}`);
   const cpuWarning = () => `llama-server runs on the CPU, not on the ${gpu?.name || 'GPU'}: no GPU build of llama.cpp can run here. ${[...failures, ...skipped].join('; ')}`;
-  for (const candidate of fallback ? plan.candidates.filter((c) => c.variant !== 'cpu') : plan.candidates) {
+  for (const candidate of fallback && !outdated ? plan.candidates.filter((c) => c.variant !== 'cpu') : plan.candidates) {
     const key = candidateKey(candidate);
     const earlier = failed[key];
     if (earlier && !options.retryFailed && Date.now() - earlier.at < FAILED_RETRY_MS) {
@@ -602,8 +622,11 @@ export async function ensureLlamaServer(options: EnsureOptions = {}): Promise<En
       continue;
     }
     const active = await activateInstall(env, install, key);
-    if (existingProblem != null && existing?.source === 'manifest' && existing.path !== active.path) await discardInstall(env, existing, installKey(existing), null);
+    if ((existingProblem != null || outdated) && existing?.source === 'manifest' && existing.path !== active.path) await discardInstall(env, existing, installKey(existing), null);
     return found(active, candidate.variant === 'cpu' && gpuHost ? cpuWarning() : undefined);
+  }
+  if (fallback && outdated) {
+    return found(fallback, `Kept llama-server from llama.cpp ${fallback.version}, because no build of ${pinnedVersion(fallback)} could be installed: ${[...failures, ...skipped].join('; ')}`);
   }
   if (fallback) return found(fallback, cpuWarning());
   return {
@@ -838,7 +861,7 @@ export function isHttpError(error: unknown): error is HttpError {
 }
 
 export async function readReleaseForTest(): Promise<ReleaseInfo> {
-  const response = await fetchJson<ReleaseInfo>(RELEASE_URL, { headers: { accept: 'application/vnd.github+json' } });
+  const response = await fetchJson<ReleaseInfo>(LLAMA_RELEASE_URL, { headers: { accept: 'application/vnd.github+json' } });
   return response;
 }
 

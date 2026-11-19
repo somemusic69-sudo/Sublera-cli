@@ -231,8 +231,8 @@ driver does not stop the engine.
   20.04/22.04, Debian 10/11/12, RHEL/Rocky 8/9), such as many hosted GPU notebooks.
   [`engine.yml`](../.github/workflows/engine.yml) builds them from an official
   llama.cpp tag on Rocky Linux 8 and publishes them as `engine-<tag>` releases of
-  this repository, with SHA-256 digests and build provenance. This CLI version asks
-  for `engine-b12503` first. The CUDA build (CUDA 12.4) carries the CUDA runtime,
+  this repository, with SHA-256 digests and build provenance. The CUDA build
+  (CUDA 12.4) carries the CUDA runtime,
   needs NVIDIA driver 525 or newer, and has native code for Maxwell to Hopper GPUs
   (compute capability 5.0 to 9.0); newer GPUs compile its PTX (driver 550 or newer).
 - Which CUDA build can run depends on the driver and the GPU (`nvidia-smi`):
@@ -251,9 +251,14 @@ driver does not stop the engine.
 - A build that was downloaded but could not run is deleted, and the agent does not
   download that kind of build again for 7 days. `sublera doctor --fix` tries every
   build again and shows each reason.
-- If only a CPU build can run on a computer with a GPU, the agent and `doctor`
-  warn. Fix the reason (for example, update the NVIDIA driver) and run
-  `sublera doctor --fix` again.
+- Each CLI version installs one llama.cpp release: this version installs `b12503`
+  (official builds) and `engine-b12503` (portable builds), so all hosts of a version
+  run the same engine for the server's model checks. An engine from another release
+  is replaced at the next install, and kept until its replacement runs.
+- If only a CPU build can run on a computer with a GPU, the agent does not load
+  models and `doctor` fails, because buyers choose a host by its GPU. Fix the reason
+  (for example, update the NVIDIA driver) and run `sublera doctor --fix` again. To
+  serve on the CPU anyway, set `SUBLERA_LLAMA_VARIANT=cpu`.
 - `SUBLERA_LLAMA_VARIANT=cuda|vulkan|rocm|metal|cpu` uses only builds of that kind,
   and replaces an installed engine of another kind. `LLAMA_SERVER=/path/to/llama-server`
   uses your own build as it is.
@@ -554,7 +559,7 @@ server that implements the same small contract:
 | `GET /api/agent/requests` | open buyer requests + VRAM fit + `cached` (the model is already on this host's disk) |
 | `POST /api/agent/requests/:id/claim` | claim from the terminal |
 | `GET /tunnel?token=...` or `/ws/agent` | persistent outbound WebSocket |
-| `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `models`, `chunk`, `done`, `error` | agent → server. `hello` carries `requestId` (from `sublera start <code>`), `cachedModels` (SHA-256 of each verified GGUF on disk) and `priceHourUsd` (the full-GPU hourly price; `0` from `start` and `jobs`, and when hourly rentals are off); `models` updates that list after a download. The first 32 tokens of every job send `chunk.lp`: `[{ t, l, top: [[token, logprob], ...] }]`. |
+| `hello`, `heartbeat`, `progress`, `loaded`, `load_failed`, `models`, `chunk`, `done`, `error` | agent → server. `hello` carries `requestId` (from `sublera start <code>`), `cachedModels` (SHA-256 of each verified GGUF on disk) and `priceHourUsd` (the full-GPU hourly price; `0` from `start` and `jobs`, and when hourly rentals are off); `hello` and `heartbeat` carry `engine` (`{ variant, build, version, cuda, gpu, verified }`, `null` until the engine is installed), so the server can compare model checks between hosts that run the same build; `models` updates that list after a download. The first 32 tokens of every job send `chunk.lp`: `[{ t, l, top: [[token, logprob], ...] }]`. |
 | HTTP `426` (JSON `minVersion` optional) or WebSocket close `4426` (reason `<min version>` optional) | server refuses an agent that is too old; the CLI stops and tells the host to run `npx sublera-cli@latest` |
 | `welcome`, `infer`, `load`, `cancel`, `verified`, `booking`, `reject` | server → agent. Model checks arrive as normal `infer` jobs. Several `booking` frames for different requests can be active at once; `shared` and `tokS` mark a speed seat (no `tokS` means the full GPU). A booking on the model that is already loaded needs no `load` frame. `reject` ends only its own request. |
 

@@ -6,7 +6,7 @@ import type { Logger } from './logger.js';
 import { GpuMonitor, applyGpuOverride, checkFit, type GpuOverride } from './hardware/gpuMonitor.js';
 import type { GpuSnapshot } from './hardware/types.js';
 import { SleepGuard } from './hardware/sleepGuard.js';
-import { ensureLlamaServer, type EnsureResult, type LlamaInstall } from './engine/binaryManager.js';
+import { CPU_ON_GPU_HELP, cpuEngineOnGpuHost, ensureLlamaServer, type EnsureResult, type LlamaInstall } from './engine/binaryManager.js';
 import { downloadModel, listCachedModels, verifyModelFile, type LoadedModel } from './engine/modelManager.js';
 import { checkModelUrl, estimateVramMb, inspectHuggingFace, parseHfUrl, paramBFromName, quantFromName, type InspectedModel } from './engine/gguf.js';
 import { LlamaRunner } from './engine/llamaRunner.js';
@@ -14,7 +14,7 @@ import { compareFingerprints, probeEngine, type EngineFingerprint } from './engi
 import { simulateChat, streamChat } from './network/streamProxy.js';
 import { TunnelClient } from './network/tunnelClient.js';
 import { TerminalDashboard, initialState, type DashboardJob, type DashboardState, type DashboardStatus } from './ui/terminalDashboard.js';
-import { activeRequestsOf, finiteNumber, isRequestId, validTime, type AgentMe, type BookingFrame, type CachedModelInfo, type ChatMessage, type HeartbeatPayload, type HelloPayload, type LoadJob, type ServerMessage, type TokenPosition } from './types.js';
+import { activeRequestsOf, finiteNumber, isRequestId, validTime, type AgentMe, type BookingFrame, type CachedModelInfo, type ChatMessage, type EngineReport, type HeartbeatPayload, type HelloPayload, type LoadJob, type ServerMessage, type TokenPosition } from './types.js';
 import { fetchJson, HttpError } from './util/http.js';
 import { execFile, sleep } from './util/exec.js';
 import { formatPercent, formatUsdNanos, modelShortName } from './util/format.js';
@@ -1022,6 +1022,9 @@ export class Agent extends EventEmitter {
           showProgress: true,
         });
       if (!result.found) throw new Error(result.reason);
+      if (cpuEngineOnGpuHost(result.install, this.gpu)) {
+        throw new Error(`${result.warning ?? `llama-server can run only on the CPU here, not on the ${this.gpu.primary?.name || 'GPU'}.`} ${CPU_ON_GPU_HELP}`);
+      }
       this.install = result.install;
       this.logger.info('llama-server ready', { path: result.install.path, variant: result.install.variant, build: result.install.build, verified: result.install.verified });
       if (result.warning) this.logger.warn(result.warning);
@@ -1151,6 +1154,20 @@ export class Agent extends EventEmitter {
     return Math.max(1, this.options.slots ?? 1, this.bookingSlots);
   }
 
+  private engineReport(): EngineReport | null {
+    const install = this.install;
+    if (this.options.simulation || !install) return null;
+    const custom = install.source === 'env' || install.source === 'path';
+    return {
+      variant: custom ? null : install.variant,
+      build: custom ? 'custom' : install.build ?? 'official',
+      version: custom ? null : install.version,
+      cuda: install.cuda ?? null,
+      gpu: custom ? null : install.variant !== 'cpu',
+      verified: install.verified,
+    };
+  }
+
   private helloPayload(): HelloPayload {
     const gpu = this.gpu.primary;
     const model = this.model;
@@ -1184,6 +1201,7 @@ export class Agent extends EventEmitter {
       priceHourUsd: this.priceHourUsd(),
       simulate: this.options.simulation,
       publicMode: Boolean(this.options.publicMode),
+      engine: this.engineReport(),
     };
   }
 
@@ -1208,6 +1226,7 @@ export class Agent extends EventEmitter {
       gpuUtilPct: gpu?.utilizationPct ?? null,
       freeVramMb: gpu?.freeVramMb ?? 0,
       slotsUsed: this.activeJobs.size,
+      engine: this.engineReport(),
     };
   }
 
