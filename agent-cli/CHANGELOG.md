@@ -6,6 +6,16 @@ names, flags, `SUBLET_*` variables, `agent.json` keys, exit codes, the
 `--json` output of `doctor` and `config` (versioned by `schemaVersion`), and
 the files under `~/.sublet`. A change to any of these needs a major version.
 
+## [1.6.0] - 2026-11-20
+
+### Added
+- `sublera host` without a model shows the models a host can serve: their size, the VRAM they need, whether
+  they fit this GPU, and how many GPUs host each one now with their lowest prices. The host picks one by
+  number or id, then types both prices (Enter keeps the default). A model too big for the GPU asks first.
+  The menu ends with the command that does the same next time.
+- `sublera host <id>` takes a model id from the server's list, such as `llama-3.1-8b`, instead of a URL.
+- `sublera host --list` prints that list; with `--json` for scripts.
+
 ## [1.5.1] - 2026-11-19
 
 ### Added

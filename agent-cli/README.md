@@ -127,7 +127,7 @@ ends and no other booking uses the GPU, or you press Ctrl+C.
 | `sublera login` | Link this computer to your account: show a code, open the website, receive a host key when you click Connect. `--key` saves a key directly; `--no-browser` only prints the link. The key is saved with mode 0600. |
 | `sublera doctor` | Agent version, Node, server, key, download speed, GPU, free VRAM, sleep guard, llama-server and cache checks. `--fix` installs the engine. `--json` for machines. |
 | `sublera start [code]` | Main mode: connect, download/verify the model of a request taken on the website, pass the model check, serve. With a code, serve that request; exit after it ends, once no other booking is active. |
-| `sublera host <url\|path>` | Public mode with a chosen GGUF: a price per 1M tokens, plus hourly rentals of the full GPU or a speed seat (`--price-hour`). |
+| `sublera host [model]` | Serve a model with no request: buyers pay a price per 1M tokens (`--price`) or rent the full GPU or a speed seat by the hour (`--price-hour`), and the model shows under Market › Hosted models. `model` is an id from the server's list (`llama-3.1-8b`), a Hugging Face GGUF URL, or a `.gguf` file. With no model, in a terminal, it shows the list: what fits your GPU and what other GPUs ask now, then asks for both prices. `--list` prints the list (`--json` for scripts). |
 | `sublera jobs` | Table of open requests with VRAM fit and payout. Pick one and it claims + serves in this terminal; `--claim <id>` is non-interactive. |
 | `sublera status` | Read-only host, reliability, wallet and a line for every active booking. |
 | `sublera config [show\|path]` | The settings in use and where each one came from (flag, env, `agent.json`, login, default). Keys are masked. |
