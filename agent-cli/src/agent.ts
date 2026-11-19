@@ -162,6 +162,18 @@ function simulatedGpu(override: GpuOverride | null): GpuSnapshot {
   return applyGpuOverride(empty, { name: override.name ?? 'Simulated GPU', vramMb: override.vramMb ?? 24_576 });
 }
 
+/** Why a model load failed, for the website to show the host the fix: no engine runs here, or only a CPU engine on a GPU computer. */
+export type LoadErrorCode = 'engine_unavailable' | 'cpu_on_gpu';
+
+function loadError(code: LoadErrorCode, message: string): Error & { loadCode: LoadErrorCode } {
+  return Object.assign(new Error(message), { loadCode: code });
+}
+
+export function loadErrorCode(error: unknown): LoadErrorCode | null {
+  const code = (error as { loadCode?: unknown } | null)?.loadCode;
+  return code === 'engine_unavailable' || code === 'cpu_on_gpu' ? code : null;
+}
+
 export class Agent extends EventEmitter {
   private readonly options: AgentOptions;
   private readonly logger: Logger;
@@ -1021,9 +1033,9 @@ export class Agent extends EventEmitter {
           requireChecksum: this.options.requireChecksum,
           showProgress: true,
         });
-      if (!result.found) throw new Error(result.reason);
+      if (!result.found) throw loadError('engine_unavailable', result.reason);
       if (cpuEngineOnGpuHost(result.install, this.gpu)) {
-        throw new Error(`${result.warning ?? `llama-server can run only on the CPU here, not on the ${this.gpu.primary?.name || 'GPU'}.`} ${CPU_ON_GPU_HELP}`);
+        throw loadError('cpu_on_gpu', `${result.warning ?? `llama-server can run only on the CPU here, not on the ${this.gpu.primary?.name || 'GPU'}.`} ${CPU_ON_GPU_HELP}`);
       }
       this.install = result.install;
       this.logger.info('llama-server ready', { path: result.install.path, variant: result.install.variant, build: result.install.build, verified: result.install.verified });
@@ -1600,7 +1612,8 @@ export class Agent extends EventEmitter {
       if (this.pending?.requestId === requestId) this.pending = null;
       await this.releaseWakeLockIfIdle();
       if (this.stopped) return;
-      this.tunnel?.send({ type: 'load_failed', requestId, message });
+      const code = loadErrorCode(error);
+      this.tunnel?.send({ type: 'load_failed', requestId, message, ...(code ? { code } : {}) });
       this.logger.error('Request load failed', { error: message });
       this.syncDashboard({ status: this.bookings.size ? 'working' : 'online', message: `Load failed: ${message}` });
     } finally {

@@ -9,7 +9,7 @@ import { WebSocketServer } from 'ws';
 
 const HOME = await mkdtemp(join(tmpdir(), 'sublet-engine-check-'));
 process.env.SUBLET_HOME = HOME;
-const { Agent } = await import('../src/agent.js');
+const { Agent, loadErrorCode } = await import('../src/agent.js');
 const { Logger } = await import('../src/logger.js');
 const { buildGgufSample } = await import('../src/engine/gguf.js');
 const { LLAMA_TAG } = await import('../src/engine/binaryManager.js');
@@ -192,7 +192,14 @@ test('a CPU engine that Sublera installed on a GPU host does not load a model', 
   });
   const internals = agent as unknown as { loadModel(input: string, opts: { context: number; requestId: string | null }): Promise<unknown> };
   try {
-    await assert.rejects(internals.loadModel(MODEL, { context: 2048, requestId: null }), /does not serve on the CPU of a computer with a GPU.*SUBLERA_LLAMA_VARIANT=cpu/);
+    await assert.rejects(internals.loadModel(MODEL, { context: 2048, requestId: null }), (error: Error) => {
+      assert.match(error.message, /does not serve on the CPU of a computer with a GPU.*SUBLERA_LLAMA_VARIANT=cpu/);
+      // The load_failed frame carries this code, so the website can show the host the fix.
+      assert.equal(loadErrorCode(error), 'cpu_on_gpu');
+      return true;
+    });
+    assert.equal(loadErrorCode(new Error('plain')), null);
+    assert.equal(loadErrorCode(Object.assign(new Error('fs'), { code: 'ENOENT' })), null);
   } finally {
     await agent.stop();
     await rm(bin, { recursive: true, force: true });
