@@ -6,6 +6,13 @@ names, flags, `SUBLET_*` variables, `agent.json` keys, exit codes, the
 `--json` output of `doctor` and `config` (versioned by `schemaVersion`), and
 the files under `~/.sublet`. A change to any of these needs a major version.
 
+## [1.5.1] - 2026-11-19
+
+### Added
+- `load_failed` carries `code` when the engine is the cause: `engine_unavailable` when no llama.cpp
+  build can run, and `cpu_on_gpu` when only a CPU build runs on a computer with a GPU. The website
+  uses it to show the host the fix instead of a cut-off error.
+
 ## [1.5.0] - 2026-11-19
 
 ### Added
