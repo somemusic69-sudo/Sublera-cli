@@ -700,3 +700,31 @@ test('cached model inventory hints require matching sidecar stat identity', asyn
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('downloadModel with requireCached refuses network fetch when uncached and reuses verified cache when present', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sublet-require-cached-'));
+  let fetchCalls = 0;
+  const countingFetch = (async () => {
+    fetchCalls++;
+    return new Response(new Uint8Array(MODEL), { headers: { 'content-length': String(MODEL.length) } });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      downloadModel({ url: STUB_URL, cacheDir: dir, expectedSha256: SHA, requireCached: true, fetchImpl: countingFetch, showProgress: false }),
+      /already be downloaded/,
+    );
+    assert.equal(fetchCalls, 0, 'requireCached must never touch the network when model is absent');
+
+    // Seed cache normally once, then verify requireCached succeeds with zero extra fetches.
+    const downloaded = await downloadModel({ url: STUB_URL, cacheDir: dir, expectedSha256: SHA, fetchImpl: countingFetch, showProgress: false });
+    assert.equal(fetchCalls, 1);
+    assert.equal(downloaded.verified, true);
+
+    const cached = await downloadModel({ url: STUB_URL, cacheDir: dir, expectedSha256: SHA, requireCached: true, fetchImpl: countingFetch, showProgress: false });
+    assert.equal(fetchCalls, 1, 'requireCached reuses verified local file without fetching');
+    assert.equal(cached.sha256, SHA);
+    assert.equal(cached.verified, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

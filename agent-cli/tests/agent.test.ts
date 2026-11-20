@@ -1079,3 +1079,59 @@ test('server values are checked: malformed request ids are ignored, numbers are 
     await clearAgentState();
   }
 });
+
+test('progress frames report downloading/downloaded/running phases and requireDownloaded refuses uncached models', async () => {
+  const server = await pollServer();
+  const agent = agentFor(server.url, true);
+  stubWake(agent);
+  const running = agent.run();
+  try {
+    await agent.waitForOnline(20_000);
+    await eventually(() => server.frames.some((f) => f.type === 'hello'));
+    const hello = server.frames.find((f) => f.type === 'hello');
+    assert.equal(hello?.llamaUp, false, 'standby agent with no loaded model reports llamaUp=false');
+
+    // Uncached model with requireDownloaded=true fails without emitting "Starting download".
+    server.send({
+      type: 'load', requestId: 'r_req_dl', url: MODEL_URL, file: 'model.gguf', sha256: 'a'.repeat(64),
+      context: 4096, requireDownloaded: true,
+    });
+    await eventually(() => server.frames.some((f) => f.type === 'load_failed' && f.requestId === 'r_req_dl'));
+    const failed = server.frames.find((f) => f.type === 'load_failed' && f.requestId === 'r_req_dl');
+    assert.match(String(failed?.message), /already be downloaded/);
+    assert.ok(!server.frames.some((f) => f.type === 'progress' && f.requestId === 'r_req_dl' && f.phase === 'downloading'));
+
+    // Cached model emits phase="downloaded" (not "downloading") and succeeds even with requireDownloaded=true.
+    (agent as unknown as { cachedModels: Array<{ sha256: string; file: string; sizeBytes: number }> }).cachedModels = [
+      { sha256: 'a'.repeat(64), file: 'model.gguf', sizeBytes: 1024 },
+    ];
+    server.send({
+      type: 'load', requestId: 'r_cached', url: MODEL_URL, file: 'model.gguf', sha256: 'a'.repeat(64),
+      context: 4096, requireDownloaded: true,
+    });
+    await eventually(() => server.frames.some((f) => f.type === 'loaded' && f.requestId === 'r_cached'));
+    const cachedProgress = server.frames.filter((f) => f.type === 'progress' && f.requestId === 'r_cached');
+    assert.ok(cachedProgress.some((f) => f.phase === 'downloaded'), 'cached model emits downloaded phase');
+    assert.ok(cachedProgress.some((f) => f.phase === 'running'), 'ready model emits running phase');
+    assert.ok(!cachedProgress.some((f) => f.phase === 'downloading'), 'cached model never emits downloading phase');
+
+    // Clear the previous pending check so the standby host can accept the next load.
+    server.send({ type: 'reject', requestId: 'r_cached', reason: 'done' });
+    await eventually(() => agent.activeBookings.length === 0);
+
+    // Uncached model without requireDownloaded emits phase="downloading" -> "running".
+    server.send({
+      type: 'load', requestId: 'r_fresh', url: 'https://huggingface.co/c/d/resolve/main/fresh.gguf',
+      file: 'fresh.gguf', sha256: 'c'.repeat(64), context: 4096, requireDownloaded: false,
+    });
+    await eventually(() => server.frames.some((f) => f.type === 'loaded' && f.requestId === 'r_fresh'));
+    const freshProgress = server.frames.filter((f) => f.type === 'progress' && f.requestId === 'r_fresh');
+    assert.ok(freshProgress.some((f) => f.phase === 'downloading' && f.percent === 0));
+    assert.ok(freshProgress.some((f) => f.phase === 'running' && f.percent === 100));
+  } finally {
+    await agent.stop();
+    await running;
+    await server.close();
+    await clearAgentState();
+  }
+});

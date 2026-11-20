@@ -892,11 +892,17 @@ export class Agent extends EventEmitter {
     this.syncDashboard({ llamaStatus: this.runner?.status || 'ready' });
   }
 
-  private async loadModel(input: string, opts: { context: number; requestId: string | null; expectedSha?: string | null; expectedLayers?: number | null; file?: string | null; signal?: AbortSignal; capContext?: boolean }): Promise<AgentModel> {
+  private async loadModel(input: string, opts: { context: number; requestId: string | null; expectedSha?: string | null; expectedLayers?: number | null; file?: string | null; signal?: AbortSignal; capContext?: boolean; requireDownloaded?: boolean }): Promise<AgentModel> {
     if (this.options.simulation) {
       const file = opts.file || (input.startsWith('http') ? parseHfUrl(input)?.file : basename(input)) || 'sublera-simulator.gguf';
+      if (opts.requireDownloaded && !this.hasCachedModel(opts.expectedSha ?? null, file)) {
+        throw new Error('This request requires the model to already be downloaded, but it is not cached on this machine.');
+      }
       const paramB = paramBFromName(file) || 7;
       const quant = quantFromName(file) || 'Q4_K_M';
+      if (opts.requestId) {
+        this.tunnel?.send({ type: 'progress', requestId: opts.requestId, phase: 'running', percent: 100, note: 'Model running; waiting for server check' });
+      }
       return {
         path: null,
         sourceUrl: input,
@@ -925,9 +931,14 @@ export class Agent extends EventEmitter {
         slots: this.runnerSlots(),
         // A file already on disk is hashed again: the SHA-256 the server gets is of the bytes that will be served.
         verifyCached: true,
+        requireCached: Boolean(opts.requireDownloaded),
         onProgress: (progress) => {
           if (opts.requestId) {
-            this.tunnel?.send({ type: 'progress', requestId: opts.requestId, note: progress.note });
+            const phase = progress.phase === 'download' ? 'downloading' : 'downloaded';
+            const percent = progress.phase === 'download'
+              ? (progress.percent != null ? Math.max(0, Math.min(100, Math.round(progress.percent))) : null)
+              : 100;
+            this.tunnel?.send({ type: 'progress', requestId: opts.requestId, phase, percent, note: progress.note });
           }
           this.dashboard.update({ message: progress.note });
         },
@@ -937,6 +948,9 @@ export class Agent extends EventEmitter {
       await this.refreshCachedModels();
     } else {
       loaded = await verifyModelFile(input, { sha256: opts.expectedSha ?? null, layers: opts.expectedLayers ?? null, context: opts.context, slots: this.runnerSlots() });
+    }
+    if (opts.requestId) {
+      this.tunnel?.send({ type: 'progress', requestId: opts.requestId, phase: 'downloaded', percent: 100, note: 'Model downloaded; loading into GPU' });
     }
     // llama-server never gives a slot more context than the model was trained for, so check before starting it.
     let context = opts.context;
@@ -979,7 +993,22 @@ export class Agent extends EventEmitter {
       architecture: loaded.architecture,
     };
     await this.ensureRunner(model, context, this.runnerSlots(), opts.requestId);
+    if (opts.requestId) {
+      this.tunnel?.send({ type: 'progress', requestId: opts.requestId, phase: 'running', percent: 100, note: 'Model running; waiting for server check' });
+    }
     return model;
+  }
+
+  private hasCachedModel(sha256: string | null, file: string | null): boolean {
+    if (sha256) {
+      const lower = sha256.toLowerCase();
+      return this.cachedModels.some((m) => m.sha256.toLowerCase() === lower);
+    }
+    if (file) {
+      const base = basename(file).toLowerCase();
+      return this.cachedModels.some((m) => basename(m.file).toLowerCase() === base);
+    }
+    return false;
   }
 
   /**
@@ -1213,6 +1242,7 @@ export class Agent extends EventEmitter {
       priceHourUsd: this.priceHourUsd(),
       simulate: this.options.simulation,
       publicMode: Boolean(this.options.publicMode),
+      llamaUp: Boolean(model && (this.options.simulation || this.runner?.status === 'ready')),
       engine: this.engineReport(),
     };
   }
@@ -1566,10 +1596,15 @@ export class Agent extends EventEmitter {
           throw new Error('The loaded model changed while this request waited; retry');
         }
         if (now.note) this.logger.warn(now.note);
-        this.tunnel?.send({ type: 'progress', requestId, note: 'Model already loaded; reusing the running engine' });
+        this.tunnel?.send({ type: 'progress', requestId, phase: 'running', percent: 100, note: 'Model already loaded and running; reusing the running engine' });
         model = reuse;
       } else {
-        this.tunnel?.send({ type: 'progress', requestId, note: 'Starting download' });
+        const alreadyCached = this.hasCachedModel(load.sha256, load.file);
+        if (alreadyCached) {
+          this.tunnel?.send({ type: 'progress', requestId, phase: 'downloaded', percent: 100, note: 'Model already downloaded; verifying file' });
+        } else if (!load.requireDownloaded) {
+          this.tunnel?.send({ type: 'progress', requestId, phase: 'downloading', percent: 0, note: 'Starting download' });
+        }
         // The server may only point at a HuggingFace download, never at a file or address on this machine.
         const url = checkModelUrl(String(load.url || ''));
         model = await this.loadModel(url, {
@@ -1579,6 +1614,7 @@ export class Agent extends EventEmitter {
           expectedSha: load.sha256,
           expectedLayers: load.layers,
           file: load.file,
+          requireDownloaded: Boolean(load.requireDownloaded),
         });
       }
       loadAbort.controller.signal.throwIfAborted();

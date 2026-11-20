@@ -18,6 +18,8 @@ export type WorkerJob = {
 /** One generated token with its log probability and the top alternatives, as llama-server reports them. */
 export type TokenPosition = { t: string; l: number; top: Array<[string, number]> };
 
+export type ProgressPhase = 'downloading' | 'downloaded' | 'loading' | 'running';
+
 export type LoadJob = {
   type: 'load';
   requestId: string;
@@ -28,6 +30,8 @@ export type LoadJob = {
   context: number;
   /** Shared bookings: one llama-server slot for each buyer the host's benchmark allows. */
   slots?: number;
+  /** When true, the renter requires the model to already be cached on disk (do not download from HuggingFace). */
+  requireDownloaded?: boolean;
 };
 
 /**
@@ -102,6 +106,8 @@ export type HelloPayload = {
   priceHourUsd: number;
   simulate: boolean;
   publicMode: boolean;
+  /** True when the agent already has llama-server ready for `file`. */
+  llamaUp?: boolean;
   /** Set by `sublera start <code>`: the request this agent wants to serve. */
   requestId?: string | null;
   cachedModels?: CachedModelInfo[];
@@ -181,6 +187,8 @@ export type ActiveRequest = {
   /** Same meaning as in the booking frame, when the server includes them. */
   shared?: boolean | null;
   tokS?: number | null;
+  modelState?: string | null;
+  downloadPct?: number | null;
 };
 
 export type AgentMe = {
@@ -257,4 +265,8 @@ export type AgentRequest = {
   timerEndsAt?: number | null;
   fit?: string | null;
   cached?: boolean;
+  hostSelection?: 'auto' | 'review';
+  requireDownloaded?: boolean;
+  hostModelState?: string | null;
+  candidateStatus?: string | null;
 };

@@ -663,7 +663,11 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
   const existing = await verifyHostKey(cfg.server, cfg.token).catch(() => null);
   if (existing?.host?.kind === 'live' && existing.host.status === 'online') {
     const result = await claimRequest(cfg, requestId, true);
-    logger.success(`Claimed ${requestId}; an already-running agent will serve it.`, { claim: result.claimId || '' });
+    if (result.status === 'interested') {
+      logger.success(`Offer sent for ${requestId}; waiting for the renter to review and accept.`, { claim: result.claimId || '' });
+    } else {
+      logger.success(`Claimed ${requestId}; an already-running agent will serve it.`, { claim: result.claimId || '' });
+    }
     return 0;
   }
 
@@ -712,8 +716,12 @@ async function serveClaim(cfg: AgentConfig, requestId: string, flags: GlobalFlag
       agent.waitForOnline(25_000),
       runPromise.then(() => { throw new Error('Agent exited before it connected'); }),
     ]);
-    await claimRequest(cfg, requestId, true);
-    logger.success(`Claimed ${requestId}. This terminal is now the serving agent.`, { stop: 'Ctrl+C' });
+    const claim = await claimRequest(cfg, requestId, true);
+    if (claim.status === 'interested') {
+      logger.success(`Offer sent for ${requestId}. Keeping this terminal online while the renter reviews interested hosts.`, { stop: 'Ctrl+C' });
+    } else {
+      logger.success(`Claimed ${requestId}. This terminal is now the serving agent.`, { stop: 'Ctrl+C' });
+    }
 
     let sawJob = false;
     let targetDone = false;
@@ -781,7 +789,11 @@ function printRequests(requests: AgentRequest[], gpu: GpuStats | null): void {
     const payout = request.totalPayoutNanos ?? (request.hours && request.pricePerHourNanos ? request.hours * request.pricePerHourNanos : 0);
     const model = request.modelLabel || request.file || request.repo || 'unknown model';
     output.write(`${String(index + 1).padStart(2)}. ${truncate(model, 38)}  ${formatUsdNanos(payout)} / ${request.hours || '?'}h  ${needs ? `${(needs / 1024).toFixed(1)}GB` : 'VRAM ?'}  ${fit}  ${request.minTokS || 0} tok/s min\n`);
-    output.write(`    id ${request.id}  ${request.status}${request.fit ? `  ${request.fit}` : ''}${request.cached ? '  model on disk: ready now' : ''}\n`);
+    const stateTag = request.hostModelState === 'running' ? '  running'
+      : request.cached || request.hostModelState === 'downloaded' ? '  downloaded'
+      : '';
+    const prefs = `${request.requireDownloaded ? '  [downloaded required]' : ''}${request.hostSelection === 'review' ? '  [host review]' : ''}${request.candidateStatus === 'interested' ? '  [offer sent]' : ''}`;
+    output.write(`    id ${request.id}  ${request.status}${request.fit ? `  ${request.fit}` : ''}${stateTag}${prefs}\n`);
   }
 }
 
@@ -794,8 +806,13 @@ async function claimRequest(cfg: AgentConfig, requestId: string, quiet = false):
       timeoutMs: 20_000,
     });
     if (!quiet) {
-      output.write(`Claimed ${requestId}${result.status ? ` (${result.status})` : ''}.\n`);
-      output.write('The running `sublera start` agent will download and verify the model, then the server starts the clock after the model check.\n');
+      if (result.status === 'interested') {
+        output.write(`Offer sent for ${requestId} (waiting for renter review).\n`);
+        output.write('Keep `sublera start` running so your GPU starts immediately if the renter accepts you.\n');
+      } else {
+        output.write(`Claimed ${requestId}${result.status ? ` (${result.status})` : ''}.\n`);
+        output.write('The running `sublera start` agent will download and verify the model, then the server starts the clock after the model check.\n');
+      }
     }
     return result;
   } catch (error) {
