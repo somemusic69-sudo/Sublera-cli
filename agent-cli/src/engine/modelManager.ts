@@ -67,6 +67,8 @@ export type DownloadModelOptions = {
    * SHA-256, unless this process already hashed the same file identity and change timestamps.
    */
   verifyCached?: boolean;
+  /** When true, refuse to download from the network and require a verified cached file on disk. */
+  requireCached?: boolean;
 };
 
 /** Avoid repeated hashes of unchanged files. Stat identity detects ordinary changes, not a malicious local administrator. */
@@ -353,6 +355,10 @@ async function downloadModelWithinBudget(options: DownloadModelOptions): Promise
       hashedThisRun.delete(dest);
       throw error;
     }
+  }
+
+  if (options.requireCached) {
+    throw new Error('This request requires the model to already be downloaded, but it is not cached on this machine.');
   }
 
   let startAt = (await fileExists(part)) ? (await stat(part)).size : 0;
