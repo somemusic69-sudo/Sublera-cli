@@ -50,7 +50,7 @@ const heartbeat = (): HeartbeatPayload => ({
   slotsUsed: 0,
 });
 
-async function startServer(onConnection: (socket: import('ws').WebSocket, count: number) => void): Promise<{ wss: WebSocketServer; port: number; connections: () => number }> {
+async function startServer(onConnection: (socket: import('ws').WebSocket, count: number, request: import('node:http').IncomingMessage) => void): Promise<{ wss: WebSocketServer; port: number; connections: () => number }> {
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await new Promise<void>((resolve) => wss.once('listening', resolve));
   let count = 0;
@@ -109,8 +109,10 @@ test('tunnel connects, sends hello, heartbeats, and reconnects after a drop', as
   }
 });
 
-test('a rejected host key stops reconnecting', async () => {
-  const server = await startServer((socket) => {
+test('a rejected host key stops reconnecting without falling back to a URL query token', async () => {
+  const urls: string[] = [];
+  const server = await startServer((socket, _count, req) => {
+    urls.push(req.url || '');
     socket.close(4001, 'bad token');
   });
   const tunnel = new TunnelClient({
@@ -123,10 +125,11 @@ test('a rejected host key stops reconnecting', async () => {
     let failed = false;
     tunnel.once('auth-failed', () => { failed = true; });
     tunnel.start();
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 250));
     assert.equal(failed, true);
     assert.equal(tunnel.state, 'auth-failed');
-    assert.equal(server.connections() >= 1, true);
+    assert.equal(server.connections(), 1, 'must not retry with a URL query token');
+    assert.ok(urls.every((u) => !u.includes('token=') && !u.includes('sh_bad')), 'host key must never appear in URL');
   } finally {
     await tunnel.stop();
     await new Promise<void>((resolve) => server.wss.close(() => resolve()));
@@ -160,11 +163,15 @@ test('a server that requires a newer agent stops reconnecting with an update hin
   }
 });
 
-test('an HTTP 401 at the tunnel handshake is treated as a rejected key', async () => {
+test('an HTTP 401 at the tunnel handshake stops immediately without putting the host key in a URL', async () => {
   let upgrades = 0;
+  const urls: string[] = [];
+  const authHeaders: string[] = [];
   const http = createServer();
-  http.on('upgrade', (_request, socket) => {
+  http.on('upgrade', (request, socket) => {
     upgrades++;
+    urls.push(request.url || '');
+    authHeaders.push(String(request.headers.authorization || ''));
     socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
   });
   await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve));
@@ -183,7 +190,9 @@ test('an HTTP 401 at the tunnel handshake is treated as a rejected key', async (
     assert.match(error.message, /HTTP 401/);
     assert.equal(tunnel.state, 'auth-failed');
     await new Promise((r) => setTimeout(r, 150));
-    assert.equal(upgrades, 2, 'expected one header attempt and one query-token fallback');
+    assert.equal(upgrades, 1, 'must fail immediately after single header attempt without URL query retry');
+    assert.deepEqual(urls, ['/tunnel']);
+    assert.deepEqual(authHeaders, ['Bearer sh_bad']);
   } finally {
     await tunnel.stop();
     await new Promise<void>((resolve) => http.close(() => resolve()));

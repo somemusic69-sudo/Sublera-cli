@@ -72,20 +72,19 @@ export function apiUrl(server: string, path: string): string {
   return `${normalizeServer(server)}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
-export function wsUrl(server: string, token: string, wsPath = '/tunnel', mode: 'query' | 'header' = 'query'): string {
+export function wsUrl(server: string, wsPath = '/tunnel'): string {
   const base = new URL(normalizeServer(server));
   base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
   const path = wsPath.trim() || '/tunnel';
   if (/^wss?:\/\//i.test(path)) {
     const full = new URL(path);
     if (full.origin !== base.origin) throw new Error('Tunnel URL must use the same server origin; refusing to forward the host key');
-    if (full.username || full.password || full.hash) throw new Error('Tunnel URL must not contain credentials or a fragment');
-    if (mode === 'query') full.searchParams.set('token', token);
+    if (full.username || full.password || full.search || full.hash) throw new Error('Tunnel URL must not contain credentials, a query, or a fragment');
     return full.toString();
   }
+  if (/[?#]/.test(path)) throw new Error('Tunnel path must not contain a query or fragment');
   base.pathname = `${base.pathname.replace(/\/+$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
   base.search = '';
-  if (mode === 'query') base.searchParams.set('token', token);
   return base.toString();
 }
 

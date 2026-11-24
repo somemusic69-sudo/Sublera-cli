@@ -20,7 +20,6 @@ export type TunnelOptions = {
   pingIntervalMs?: number;
   staleAfterMs?: number;
   autoReconnect?: boolean;
-  authMode?: 'header' | 'query';
   wsFactory?: (url: string) => WebSocket;
 };
 
@@ -36,8 +35,6 @@ export class TunnelClient extends EventEmitter {
   private pingTimer: NodeJS.Timeout | null = null;
   private heartbeatMs: number;
   private manuallyStopped = false;
-  private authMode: 'header' | 'query';
-  private triedQueryFallback = false;
   private welcomeWaiters: Array<{ resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }> = [];
   private _username: string | null = null;
   private _lastMessageAt = 0;
@@ -48,7 +45,6 @@ export class TunnelClient extends EventEmitter {
     this.logger = options.logger;
     this.delays = options.reconnectDelaysMs || RECONNECT_DELAYS_MS;
     this.heartbeatMs = options.heartbeatMs ?? HEARTBEAT_MS;
-    this.authMode = options.authMode ?? 'header';
   }
 
   get state(): TunnelState { return this._state; }
@@ -83,13 +79,14 @@ export class TunnelClient extends EventEmitter {
   private connect(): void {
     if (this.manuallyStopped) return;
     this.setState(this.attempts === 0 ? 'connecting' : 'reconnecting');
-    const useQuery = this.authMode === 'query';
-    const url = buildWsUrl(this.options.server, useQuery ? this.options.token : '', this.options.wsPath, useQuery ? 'query' : 'header');
-    this.logger?.debug('Opening tunnel', { url: url.replace(/token=[^&]+/, 'token=***'), auth: this.authMode });
+    const url = buildWsUrl(this.options.server, this.options.wsPath);
+    this.logger?.debug('Opening tunnel', { url, auth: 'header' });
     let socket: WebSocket;
     try {
-      const headers: Record<string, string> = { 'user-agent': USER_AGENT };
-      if (!useQuery) headers.authorization = `Bearer ${this.options.token}`;
+      const headers: Record<string, string> = {
+        'user-agent': USER_AGENT,
+        authorization: `Bearer ${this.options.token}`,
+      };
       socket = this.options.wsFactory ? this.options.wsFactory(url) : new WebSocket(url, {
         headers,
         handshakeTimeout: 15_000,
@@ -163,14 +160,6 @@ export class TunnelClient extends EventEmitter {
       }
       const authClose = code === 4001 || code === 4003 || handshakeStatus === 401 || handshakeStatus === 403 || /token|auth/i.test(text);
       if (authClose) {
-        if (this.authMode === 'header' && !this.triedQueryFallback) {
-          this.authMode = 'query';
-          this.triedQueryFallback = true;
-          this.logger?.debug('Header auth was rejected; retrying with the query-token fallback');
-          this.setState('reconnecting');
-          this.scheduleReconnect();
-          return;
-        }
         this.setState('auth-failed');
         const error = new Error(`Host key was rejected by the server (${handshakeStatus ? `HTTP ${handshakeStatus}` : code}${text ? `: ${text}` : ''})`);
         this.rejectWelcomeWaiters(error);
