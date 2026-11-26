@@ -99,9 +99,9 @@ test('a saved key is scoped to its server, even with a command-line server overr
 test('server and tunnel URLs reject embedded credentials and cross-origin forwarding', () => {
   assert.throws(() => normalizeServer('https://user:password@server.test'), /credentials/);
   assert.throws(() => normalizeServer('https://server.test?token=x'), /query/);
-  assert.throws(() => wsUrl('https://server.test', 'sh_secret', 'wss://other.test/tunnel'), /same server origin/);
-  assert.throws(() => wsUrl('https://server.test', 'sh_secret', 'ws://server.test/tunnel'), /same server origin/);
-  assert.equal(wsUrl('https://server.test', 'sh_secret', 'wss://server.test/custom', 'header'), 'wss://server.test/custom');
+  assert.throws(() => wsUrl('https://server.test', 'wss://other.test/tunnel'), /same server origin/);
+  assert.throws(() => wsUrl('https://server.test', 'ws://server.test/tunnel'), /same server origin/);
+  assert.equal(wsUrl('https://server.test', 'wss://server.test/custom'), 'wss://server.test/custom');
 });
 
 test('local operational commands do not require a proxy and maintenance is dry-run by default', async (t) => {

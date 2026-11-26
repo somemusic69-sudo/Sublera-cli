@@ -82,7 +82,7 @@ async function resolvedConfig(flags: GlobalFlags, requireToken: boolean): Promis
   const token = flags.token || existing?.token || '';
   if (!token && requireToken) throw new UsageError('No host key. Run: sublera login, or set SUBLET_KEY');
   const wsPath = flags.wsPath || brandEnv(process.env, 'SUBLET_WS_PATH') || existing?.wsPath || DEFAULT_WS_PATH;
-  try { wsUrl(server, '', wsPath, 'header'); } catch (error) {
+  try { wsUrl(server, wsPath); } catch (error) {
     throw new UsageError(error instanceof Error ? error.message : 'Invalid tunnel URL');
   }
   return {

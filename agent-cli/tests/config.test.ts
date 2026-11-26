@@ -26,16 +26,14 @@ test('a link from the server opens only on its own origin, and never as a progra
 });
 import { parseArgv } from '../src/index.js';
 
-test('server URLs are normalized and websocket URLs keep the token', () => {
+test('server URLs are normalized and websocket URLs never put credentials in query strings', () => {
   assert.equal(normalizeServer('localhost:8787'), 'http://localhost:8787');
   assert.equal(normalizeServer('sublet.example.com/'), 'https://sublet.example.com');
   assert.equal(normalizeServer('https://sublet.example.com/api/'), 'https://sublet.example.com/api');
-  const ws = wsUrl('https://sublet.example.com', 'sh_abc123', '/tunnel');
-  assert.match(ws, /^wss:\/\/sublet\.example\.com\/tunnel\?token=sh_abc123$/);
-  const headerMode = wsUrl('https://sublet.example.com', 'sh_abc123', '/tunnel', 'header');
-  assert.equal(headerMode, 'wss://sublet.example.com/tunnel');
-  const local = wsUrl('http://127.0.0.1:8787', 'sh_x');
-  assert.match(local, /^ws:\/\/127\.0\.0\.1:8787\/tunnel\?token=sh_x$/);
+  assert.equal(wsUrl('https://sublet.example.com', '/tunnel'), 'wss://sublet.example.com/tunnel');
+  assert.equal(wsUrl('http://127.0.0.1:8787'), 'ws://127.0.0.1:8787/tunnel');
+  assert.throws(() => wsUrl('https://sublet.example.com', '/tunnel?token=sh_secret'), /query/);
+  assert.throws(() => wsUrl('https://sublet.example.com', 'wss://sublet.example.com/tunnel?token=sh_secret'), /query/);
 });
 
 test('tokens are masked in logs', () => {
